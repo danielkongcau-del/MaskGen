@@ -1,0 +1,33 @@
+# Local datasets
+data/
+
+# Local training outputs
+results/
+outputs/
+runs/
+logs/
+pretrained/
+cache/
+openai/
+apex-master/
+
+# Large checkpoint files
+*.pt
+*.pth
+*.ckpt
+*.bin
+
+# Python cache / environments
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+conda/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
