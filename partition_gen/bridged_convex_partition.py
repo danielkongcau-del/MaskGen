@@ -18,6 +18,8 @@ from partition_gen.convex_partition import (
     _polygon_holes,
     _polygon_outer_vertices,
     _primitive_type,
+    _shared_boundary_length,
+    _single_polygon_union,
     greedy_convex_merge,
 )
 
@@ -480,20 +482,171 @@ def _remove_duplicate_and_collinear(points: Sequence[Point2D], *, eps: float) ->
         for index, point in enumerate(cleaned):
             prev_point = cleaned[(index - 1) % count]
             next_point = cleaned[(index + 1) % count]
+            prev_length = _segment_length(prev_point, point)
+            next_length = _segment_length(point, next_point)
+            if prev_length <= eps or next_length <= eps:
+                changed = True
+                continue
+
             ax = point[0] - prev_point[0]
             ay = point[1] - prev_point[1]
             bx = next_point[0] - point[0]
             by = next_point[1] - point[1]
             cross = abs(ax * by - ay * bx)
-            scale = max(_segment_length(prev_point, point), _segment_length(point, next_point), 1.0)
-            if cross <= eps * scale and (
-                _segment_length(prev_point, point) <= eps or _segment_length(point, next_point) <= eps
-            ):
+            base_length = _segment_length(prev_point, next_point)
+            line_distance = cross / max(base_length, eps)
+            dot = (point[0] - prev_point[0]) * (point[0] - next_point[0]) + (
+                point[1] - prev_point[1]
+            ) * (point[1] - next_point[1])
+            if line_distance <= eps and dot <= eps * max(base_length, 1.0):
                 changed = True
                 continue
             next_points.append(point)
         cleaned = next_points
     return cleaned
+
+
+def _cluster_close_points(points: Sequence[Point2D], *, eps: float) -> Dict[Point2D, Point2D]:
+    clusters: List[List[Point2D]] = []
+    for point in points:
+        point = (float(point[0]), float(point[1]))
+        matched_cluster: List[Point2D] | None = None
+        for cluster in clusters:
+            if any(_segment_length(point, existing) <= eps for existing in cluster):
+                matched_cluster = cluster
+                break
+        if matched_cluster is None:
+            clusters.append([point])
+        else:
+            matched_cluster.append(point)
+
+    mapping: Dict[Point2D, Point2D] = {}
+    for cluster in clusters:
+        representative = (
+            float(sum(point[0] for point in cluster) / len(cluster)),
+            float(sum(point[1] for point in cluster) / len(cluster)),
+        )
+        for point in cluster:
+            mapping[point] = representative
+    return mapping
+
+
+def _cleanup_polygon_after_snap(
+    polygon: Polygon,
+    *,
+    cleanup_eps: float,
+    config: BridgedPartitionConfig,
+    point_mapping: Dict[Point2D, Point2D] | None = None,
+) -> Polygon | None:
+    if polygon.is_empty or polygon.area <= config.area_eps:
+        return None
+    ring = []
+    for point in _polygon_outer_vertices(polygon):
+        point = (float(point[0]), float(point[1]))
+        ring.append(point_mapping.get(point, point) if point_mapping is not None else point)
+    ring = _remove_duplicate_and_collinear(ring, eps=cleanup_eps)
+    if len(ring) < 3:
+        return None
+    cleaned = Polygon(ring)
+    if cleaned.is_empty or cleaned.area <= config.area_eps:
+        return None
+    if not cleaned.is_valid:
+        fixed = cleaned.buffer(0)
+        fixed_polygons = [item for item in _iter_polygons(fixed) if item.area > config.area_eps]
+        if len(fixed_polygons) != 1:
+            return None
+        cleaned = fixed_polygons[0]
+    if len(cleaned.interiors) > 0:
+        return None
+    return orient(cleaned, sign=1.0)
+
+
+def _cleanup_snapped_pieces(
+    pieces: Sequence[Polygon],
+    *,
+    cleanup_eps: float,
+    config: BridgedPartitionConfig,
+) -> List[Polygon]:
+    all_points: List[Point2D] = []
+    for piece in pieces:
+        all_points.extend((float(x), float(y)) for x, y in _polygon_outer_vertices(piece))
+    point_mapping = _cluster_close_points(all_points, eps=cleanup_eps)
+    cleaned: List[Polygon] = []
+    for piece in pieces:
+        cleaned_piece = _cleanup_polygon_after_snap(
+            piece,
+            cleanup_eps=cleanup_eps,
+            config=config,
+            point_mapping=point_mapping,
+        )
+        if cleaned_piece is not None:
+            cleaned.append(cleaned_piece)
+    return cleaned
+
+
+def _post_snap_cleanup_and_convex_merge(
+    pieces: Sequence[Polygon],
+    *,
+    cleanup_eps: float,
+    config: BridgedPartitionConfig,
+) -> Tuple[List[Polygon], Dict[str, object]]:
+    active = _cleanup_snapped_pieces(pieces, cleanup_eps=cleanup_eps, config=config)
+    merge_history: List[Dict[str, object]] = []
+    shared_eps = max(config.validity_eps, cleanup_eps * 0.25)
+
+    while True:
+        best: Tuple[float, float, int, int, Polygon] | None = None
+        for left_index in range(len(active)):
+            for right_index in range(left_index + 1, len(active)):
+                left = active[left_index]
+                right = active[right_index]
+                shared_length = _shared_boundary_length(left, right)
+                if shared_length <= shared_eps:
+                    continue
+                union = _single_polygon_union(left, right)
+                if union is None:
+                    continue
+                merged = _cleanup_polygon_after_snap(
+                    union,
+                    cleanup_eps=cleanup_eps,
+                    config=config,
+                )
+                if merged is None:
+                    continue
+                if not _is_convex_polygon(merged, rel_eps=config.validity_eps, abs_eps=config.area_eps):
+                    continue
+                candidate = (float(shared_length), float(merged.area), left_index, right_index, merged)
+                if best is None or candidate[:4] > best[:4]:
+                    best = candidate
+
+        if best is None:
+            break
+
+        shared_length, merged_area, left_index, right_index, merged = best
+        merge_history.append(
+            {
+                "left_index": int(left_index),
+                "right_index": int(right_index),
+                "shared_edge_length": float(shared_length),
+                "merged_area": float(merged_area),
+                "vertex_count": int(len(_polygon_outer_vertices(merged))),
+            }
+        )
+        next_active = [
+            piece
+            for index, piece in enumerate(active)
+            if index not in {left_index, right_index}
+        ]
+        next_active.append(merged)
+        next_active.sort(key=lambda item: (-float(item.area), item.centroid.x, item.centroid.y))
+        active = next_active
+
+    return active, {
+        "post_snap_cleanup_eps": float(cleanup_eps),
+        "post_snap_merge_count": int(len(merge_history)),
+        "post_snap_merge_history": merge_history,
+        "post_snap_final_piece_count": int(len(active)),
+    }
 
 
 def _snap_piece_to_bridge_lines(
@@ -561,6 +714,9 @@ def _pieces_from_fallback(geometry: Polygon, *, config: BridgedPartitionConfig) 
     return pieces, {
         "backend": "fallback_cdt_greedy",
         "optimal": False,
+        "simple_polygon_optimal": False,
+        "global_optimal": False,
+        "optimal_scope": "fallback_cdt_greedy",
         "reason": "CGAL optimal convex partition CLI is not available.",
         "triangle_count": int(payload["triangle_count"]),
         "baseline_final_primitive_count": int(payload["final_primitive_count"]),
@@ -619,6 +775,9 @@ def _run_cgal_cli(simple_ring: Sequence[Point2D], *, config: BridgedPartitionCon
     backend_info = dict(payload.get("backend_info") or {})
     backend_info.setdefault("backend", "cgal")
     backend_info.setdefault("optimal", True)
+    backend_info.setdefault("simple_polygon_optimal", True)
+    backend_info.setdefault("global_optimal", True)
+    backend_info.setdefault("optimal_scope", "simple_polygon")
     backend_info["cli_path"] = str(cli_path)
     backend_info["piece_count"] = int(len(pieces))
     return pieces, backend_info
@@ -673,12 +832,18 @@ def _run_cgal_cut_open_bridge_sets(
             for piece in cut_pieces
             if (snapped := _snap_piece_to_bridge_lines(piece, bridges, snap_eps=snap_eps, config=config)) is not None
         ]
-        validation = validate_bridged_partition(geometry, snapped_pieces, config=config)
+        cleanup_eps = max(snap_eps * 4.0, config.validity_eps)
+        final_pieces, post_snap_info = _post_snap_cleanup_and_convex_merge(
+            snapped_pieces,
+            cleanup_eps=cleanup_eps,
+            config=config,
+        )
+        validation = validate_bridged_partition(geometry, final_pieces, config=config)
         score = (
             0 if validation["is_valid"] else 1,
-            int(len(snapped_pieces)),
+            int(len(final_pieces)),
             float(bridge_set.total_length),
-            int(_sum_piece_vertices(snapped_pieces)),
+            int(_sum_piece_vertices(final_pieces)),
             -float(validation["iou"]),
         )
         candidate_backend = dict(backend_info)
@@ -696,6 +861,7 @@ def _run_cgal_cut_open_bridge_sets(
                 "snap_eps": float(snap_eps),
                 "pre_snap_piece_count": int(len(cut_pieces)),
                 "post_snap_piece_count": int(len(snapped_pieces)),
+                **post_snap_info,
                 "selection_score": [float(value) if isinstance(value, float) else int(value) for value in score],
             }
         )
@@ -703,8 +869,8 @@ def _run_cgal_cut_open_bridge_sets(
             candidate_backend["rejected_bridge_sets"] = rejected[:16]
 
         if best is None or score < best[0]:
-            best = (score, snapped_pieces, candidate_backend, bridge_set, simple_ring)
-            if validation["is_valid"] and len(snapped_pieces) == 1:
+            best = (score, final_pieces, candidate_backend, bridge_set, simple_ring)
+            if validation["is_valid"] and len(final_pieces) == 1:
                 break
 
     if best is None:

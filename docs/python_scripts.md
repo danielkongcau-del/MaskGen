@@ -48,6 +48,24 @@ Visualizes one convex partition result, including source face, triangulation, an
 
 Visualizes one bridged convex partition result, including selected bridges, boundary walk metadata, and final convex pieces.
 
+### `scripts/benchmark_convex_splitters.py`
+
+Runs a face-level benchmark comparing the stable CDT + greedy baseline against the bridged convex partition splitter.
+
+It writes one JSONL row per face and `cut_slit_scale`, including piece counts, validation IoU, bridge-search counts, backend metadata, and runtime.
+
+### `scripts/summarize_convex_splitter_benchmark.py`
+
+Summarizes a convex splitter benchmark JSONL file into Markdown or JSON.
+
+The summary reports success/fallback rates, piece-count reductions, grouped statistics, worst IoU cases, and samples where the bridged splitter does not improve over the baseline.
+
+### `scripts/export_convex_splitter_failures.py`
+
+Rebuilds and visualizes benchmark rows that need inspection.
+
+It exports cases with low IoU, fallback backend usage, rejected bridge sets, or no piece-count improvement.
+
 ## Supporting Or Experimental Dataset Scripts
 
 ### `scripts/build_cdt_partition_dataset.py`

@@ -62,6 +62,17 @@ If `backend=cgal` is explicitly requested and the CLI is not available, the scri
 
 For polygons with holes, v1 uses `outer_star_v1` bridges, opens them with a very narrow slit, runs CGAL on the resulting simple polygon, then snaps slit-boundary vertices back to the original bridge centerline. The result is validated against the original polygon-with-holes.
 
+After snapping, the implementation runs a local post-processing pass:
+
+```text
+snap slit vertices back
+  -> cluster near-duplicate slit vertices
+  -> remove near-duplicate / near-collinear vertices
+  -> greedily merge adjacent pieces when their union is still strictly convex
+```
+
+This pass is only intended to remove numerical artifacts introduced by the temporary slit. It is not a semantic merge rule and does not change the fixed geometry approximator.
+
 The hole path records:
 
 ```text
@@ -73,6 +84,24 @@ global_optimal = false
 ```
 
 This means CGAL is optimal for the selected cut-open simple polygon. It does not yet claim global optimality over all possible bridge trees.
+
+For no-hole polygons, the CGAL backend records:
+
+```text
+backend = cgal
+simple_polygon_optimal = true
+optimal_scope = simple_polygon
+global_optimal = true
+```
+
+Fallback results record:
+
+```text
+backend = fallback_cdt_greedy
+simple_polygon_optimal = false
+optimal_scope = fallback_cdt_greedy
+global_optimal = false
+```
 
 ## Build CGAL Backend
 
@@ -115,6 +144,31 @@ conda run -n lmf python scripts/visualize_bridged_convex_partition.py `
   --output outputs/visualizations/face83_16_bridged_convex_partition.png
 ```
 
+## Benchmarking
+
+Use the benchmark tools to compare this splitter against the CDT + greedy baseline over geometry approximation JSON files:
+
+```powershell
+conda run -n lmf python scripts/benchmark_convex_splitters.py `
+  --approx-root data/remote_256_geometry_approx_debug `
+  --split val `
+  --output outputs/benchmarks/convex_splitter_benchmark_val.jsonl `
+  --backend auto `
+  --cut-slit-scales 1e-7 1e-6 1e-5
+
+conda run -n lmf python scripts/summarize_convex_splitter_benchmark.py `
+  --input outputs/benchmarks/convex_splitter_benchmark_val.jsonl `
+  --output outputs/benchmarks/convex_splitter_benchmark_val.md
+```
+
+To inspect failures or non-improvements:
+
+```powershell
+conda run -n lmf python scripts/export_convex_splitter_failures.py `
+  --benchmark-jsonl outputs/benchmarks/convex_splitter_benchmark_val.jsonl `
+  --output-dir outputs/visualizations/convex_splitter_failures
+```
+
 ## Output Fields
 
 Important payload fields:
@@ -129,6 +183,8 @@ Important payload fields:
 - `simple_polygon_boundary_walk`
 - `backend_info.bridge_cut_mode`
 - `backend_info.optimal_scope`
+- `backend_info.post_snap_cleanup_eps`
+- `backend_info.post_snap_merge_count`
 - `primitives`
 - `validation`
 

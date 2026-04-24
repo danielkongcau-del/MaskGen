@@ -104,6 +104,35 @@ conda run -n lmf python scripts/visualize_bridged_convex_partition.py `
   --output outputs/visualizations/face83_16_bridged_convex_partition.png
 ```
 
+## Benchmark Convex Splitters
+
+Compare the CDT + greedy baseline against the bridged CGAL splitter on geometry approximation JSON files.
+
+```powershell
+conda run -n lmf python scripts/benchmark_convex_splitters.py `
+  --approx-root data/remote_256_geometry_approx_debug `
+  --split val `
+  --output outputs/benchmarks/convex_splitter_benchmark_val.jsonl `
+  --backend auto `
+  --cut-slit-scales 1e-7 1e-6 1e-5
+```
+
+Summarize the JSONL benchmark:
+
+```powershell
+conda run -n lmf python scripts/summarize_convex_splitter_benchmark.py `
+  --input outputs/benchmarks/convex_splitter_benchmark_val.jsonl `
+  --output outputs/benchmarks/convex_splitter_benchmark_val.md
+```
+
+Export visual checks for low-IoU, fallback, rejected-bridge, or non-improving cases:
+
+```powershell
+conda run -n lmf python scripts/export_convex_splitter_failures.py `
+  --benchmark-jsonl outputs/benchmarks/convex_splitter_benchmark_val.jsonl `
+  --output-dir outputs/visualizations/convex_splitter_failures
+```
+
 ## Visualize Convex Partition
 
 ```powershell
