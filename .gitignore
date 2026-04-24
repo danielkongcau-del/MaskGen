@@ -3,7 +3,9 @@ data/
 
 # Local training outputs
 results/
-outputs/
+outputs/*
+!outputs/visualizations/
+!outputs/visualizations/**
 runs/
 logs/
 pretrained/
@@ -25,6 +27,16 @@ __pycache__/
 venv/
 env/
 conda/
+
+# Local C/C++ builds
+build/
+cmake-build-*/
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.lib
+*.dll
 
 # Editors / OS
 .idea/

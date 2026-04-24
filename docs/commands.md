@@ -79,7 +79,13 @@ data/remote_256_convex_partition_from_approx_debug/val/graphs/83_face16.json
 
 ## Build Bridged Convex Partition From Geometry Approximation
 
-This branch records bridge candidates for holes and then uses an optimal backend when available. If CGAL is not available, it falls back to the current CDT + greedy convex merge and marks `optimal=false`.
+This branch records bridge candidates for holes and then uses CGAL when available. Simple polygons run directly through `CGAL::optimal_convex_partition_2`; polygons with holes use `epsilon_slit_snap_v1` to cut holes open before CGAL. If CGAL is not available, it falls back to the current CDT + greedy convex merge and marks `optimal=false`.
+
+Build the CGAL CLI backend first if you want true optimal partitioning for simple polygons without holes:
+
+```powershell
+cmd /c 'call "D:\Microsoft Visual Studio\VC\Auxiliary\Build\vcvars64.bat" && cmake -Wno-dev -S tools -B build\cgal_tools -G "Visual Studio 18 2026" -A x64 -DCMAKE_TOOLCHAIN_FILE=D:\vcpkg\scripts\buildsystems\vcpkg.cmake && cmake --build build\cgal_tools --config Release'
+```
 
 ```powershell
 conda run -n lmf python scripts/build_bridged_convex_partition_from_approx_single.py `

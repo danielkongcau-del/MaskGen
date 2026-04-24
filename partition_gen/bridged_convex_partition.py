@@ -8,8 +8,9 @@ import tempfile
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
 
-from shapely.geometry import GeometryCollection, LineString, MultiLineString, MultiPoint, Point, Polygon
+from shapely.geometry import GeometryCollection, LineString, MultiLineString, MultiPoint, MultiPolygon, Point, Polygon
 from shapely.geometry.polygon import orient
+from shapely.ops import unary_union
 
 from partition_gen.convex_partition import (
     ConvexMergeConfig,
@@ -50,6 +51,7 @@ class BridgedPartitionConfig:
     validity_eps: float = 1e-7
     backend: str = "auto"
     cgal_cli: str | None = None
+    cut_slit_scale: float = 1e-6
 
 
 class _UnionFind:
@@ -340,6 +342,193 @@ def build_outer_star_boundary_walk(
     return [(float(x), float(y)) for x, y in walk]
 
 
+def _iter_polygons(geometry) -> Iterable[Polygon]:
+    if geometry.is_empty:
+        return
+    if isinstance(geometry, Polygon):
+        yield geometry
+        return
+    if isinstance(geometry, MultiPolygon):
+        for item in geometry.geoms:
+            yield item
+        return
+    if isinstance(geometry, GeometryCollection):
+        for item in geometry.geoms:
+            yield from _iter_polygons(item)
+
+
+def _bridge_candidates_for_set(
+    bridge_set: BridgeSet,
+    candidates_by_id: Dict[int, BridgeCandidate],
+) -> List[BridgeCandidate]:
+    return [candidates_by_id[bridge_id] for bridge_id in bridge_set.bridge_ids]
+
+
+def _slit_distance(geometry: Polygon, *, config: BridgedPartitionConfig) -> float:
+    minx, miny, maxx, maxy = geometry.bounds
+    scale = max(float(maxx - minx), float(maxy - miny), 1.0)
+    return max(config.validity_eps * 100.0, scale * config.cut_slit_scale)
+
+
+def _extended_bridge_line(candidate: BridgeCandidate, distance: float) -> LineString:
+    px, py = candidate.p
+    qx, qy = candidate.q
+    length = _segment_length(candidate.p, candidate.q)
+    if length <= 0:
+        return LineString([candidate.p, candidate.q])
+    ux = (qx - px) / length
+    uy = (qy - py) / length
+    extension = max(distance * 8.0, 1e-9)
+    return LineString(
+        [
+            (float(px - ux * extension), float(py - uy * extension)),
+            (float(qx + ux * extension), float(qy + uy * extension)),
+        ]
+    )
+
+
+def _cut_open_geometry_with_slits(
+    geometry: Polygon,
+    bridge_set: BridgeSet,
+    candidates_by_id: Dict[int, BridgeCandidate],
+    *,
+    config: BridgedPartitionConfig,
+) -> Tuple[Polygon | None, Dict[str, object]]:
+    bridges = _bridge_candidates_for_set(bridge_set, candidates_by_id)
+    distance = _slit_distance(geometry, config=config)
+    if not bridges:
+        return orient(geometry, sign=1.0), {"cut_slit_distance": 0.0, "cut_slit_area": 0.0}
+
+    slit_buffers = [
+        _extended_bridge_line(candidate, distance).buffer(distance, cap_style=2, join_style=2)
+        for candidate in bridges
+    ]
+    slit_union = unary_union(slit_buffers)
+    cut_geometry = geometry.difference(slit_union).buffer(0)
+    polygons = [polygon for polygon in _iter_polygons(cut_geometry) if polygon.area > config.area_eps]
+    metadata = {
+        "cut_slit_distance": float(distance),
+        "cut_slit_area": float(geometry.intersection(slit_union).area),
+        "cut_component_count": int(len(polygons)),
+    }
+    if len(polygons) != 1:
+        metadata["reject_reason"] = "cut geometry is not a single polygon"
+        return None, metadata
+    cut_polygon = orient(polygons[0], sign=1.0)
+    metadata["cut_hole_count"] = int(len(cut_polygon.interiors))
+    metadata["cut_area"] = float(cut_polygon.area)
+    if len(cut_polygon.interiors) != 0:
+        metadata["reject_reason"] = "cut geometry still has holes"
+        return None, metadata
+    if not cut_polygon.is_valid:
+        metadata["reject_reason"] = "cut geometry is invalid"
+        return None, metadata
+    return cut_polygon, metadata
+
+
+def _project_point_to_segment(point: Point2D, p: Point2D, q: Point2D) -> Tuple[Point2D, float, float]:
+    px, py = p
+    qx, qy = q
+    vx = qx - px
+    vy = qy - py
+    wx = point[0] - px
+    wy = point[1] - py
+    denom = vx * vx + vy * vy
+    if denom <= 0:
+        return p, _segment_length(point, p), 0.0
+    t = (wx * vx + wy * vy) / denom
+    clamped = min(1.0, max(0.0, t))
+    projected = (float(px + clamped * vx), float(py + clamped * vy))
+    return projected, _segment_length(point, projected), float(t)
+
+
+def _snap_point_to_bridges(
+    point: Point2D,
+    bridges: Sequence[BridgeCandidate],
+    *,
+    snap_eps: float,
+) -> Point2D:
+    best_point = point
+    best_distance = snap_eps
+    for bridge in bridges:
+        projected, distance, t = _project_point_to_segment(point, bridge.p, bridge.q)
+        if -0.05 <= t <= 1.05 and distance <= best_distance:
+            if _segment_length(projected, bridge.p) <= snap_eps * 4.0:
+                projected = bridge.p
+            elif _segment_length(projected, bridge.q) <= snap_eps * 4.0:
+                projected = bridge.q
+            best_point = projected
+            best_distance = distance
+    return (float(best_point[0]), float(best_point[1]))
+
+
+def _remove_duplicate_and_collinear(points: Sequence[Point2D], *, eps: float) -> List[Point2D]:
+    cleaned: List[Point2D] = []
+    for point in points:
+        point = (float(point[0]), float(point[1]))
+        if cleaned and _segment_length(cleaned[-1], point) <= eps:
+            continue
+        cleaned.append(point)
+    if len(cleaned) > 1 and _segment_length(cleaned[0], cleaned[-1]) <= eps:
+        cleaned.pop()
+
+    changed = True
+    while changed and len(cleaned) >= 3:
+        changed = False
+        next_points: List[Point2D] = []
+        count = len(cleaned)
+        for index, point in enumerate(cleaned):
+            prev_point = cleaned[(index - 1) % count]
+            next_point = cleaned[(index + 1) % count]
+            ax = point[0] - prev_point[0]
+            ay = point[1] - prev_point[1]
+            bx = next_point[0] - point[0]
+            by = next_point[1] - point[1]
+            cross = abs(ax * by - ay * bx)
+            scale = max(_segment_length(prev_point, point), _segment_length(point, next_point), 1.0)
+            if cross <= eps * scale and (
+                _segment_length(prev_point, point) <= eps or _segment_length(point, next_point) <= eps
+            ):
+                changed = True
+                continue
+            next_points.append(point)
+        cleaned = next_points
+    return cleaned
+
+
+def _snap_piece_to_bridge_lines(
+    piece: Polygon,
+    bridges: Sequence[BridgeCandidate],
+    *,
+    snap_eps: float,
+    config: BridgedPartitionConfig,
+) -> Polygon | None:
+    if piece.is_empty or piece.area <= config.area_eps:
+        return None
+    ring = _polygon_outer_vertices(piece)
+    snapped = [
+        _snap_point_to_bridges((float(x), float(y)), bridges, snap_eps=snap_eps)
+        for x, y in ring
+    ]
+    snapped = _remove_duplicate_and_collinear(snapped, eps=config.validity_eps)
+    if len(snapped) < 3:
+        return None
+    polygon = Polygon(snapped)
+    if polygon.is_empty or polygon.area <= config.area_eps:
+        return None
+    if not polygon.is_valid:
+        fixed = polygon.buffer(0)
+        fixed_polygons = [item for item in _iter_polygons(fixed) if item.area > config.area_eps]
+        if len(fixed_polygons) != 1:
+            return None
+        polygon = fixed_polygons[0]
+    return orient(polygon, sign=1.0)
+
+
+def _sum_piece_vertices(pieces: Sequence[Polygon]) -> int:
+    return sum(len(_polygon_outer_vertices(piece)) for piece in pieces)
+
+
 def _polygon_from_primitive_payload(primitive: Dict[str, object]) -> Polygon:
     return orient(Polygon(primitive["outer"], primitive.get("holes", [])), sign=1.0)
 
@@ -381,7 +570,27 @@ def _pieces_from_fallback(geometry: Polygon, *, config: BridgedPartitionConfig) 
 def _find_cgal_cli(config: BridgedPartitionConfig) -> str | None:
     if config.cgal_cli:
         return str(config.cgal_cli)
-    return shutil.which("optimal_convex_partition_cli")
+    path_cli = shutil.which("optimal_convex_partition_cli")
+    if path_cli:
+        return path_cli
+
+    executable_names = ["optimal_convex_partition_cli.exe", "optimal_convex_partition_cli"]
+    repo_root = Path(__file__).resolve().parents[1]
+    candidate_dirs = [
+        repo_root / "build" / "cgal_tools" / "Release",
+        repo_root / "build" / "cgal_tools" / "Debug",
+        repo_root / "build" / "Release",
+        repo_root / "build" / "Debug",
+        repo_root / "tools" / "build" / "Release",
+        repo_root / "tools" / "build" / "Debug",
+        repo_root / "tools",
+    ]
+    for directory in candidate_dirs:
+        for executable_name in executable_names:
+            candidate = directory / executable_name
+            if candidate.exists():
+                return str(candidate)
+    return None
 
 
 def _run_cgal_cli(simple_ring: Sequence[Point2D], *, config: BridgedPartitionConfig) -> Tuple[List[Polygon], Dict[str, object]] | None:
@@ -407,7 +616,105 @@ def _run_cgal_cli(simple_ring: Sequence[Point2D], *, config: BridgedPartitionCon
         if not payload.get("success", False):
             raise RuntimeError(f"CGAL CLI returned success=false: {payload.get('error', 'unknown error')}")
         pieces = [orient(Polygon(ring), sign=1.0) for ring in payload.get("pieces", [])]
-    return pieces, {"backend": "cgal", "optimal": True}
+    backend_info = dict(payload.get("backend_info") or {})
+    backend_info.setdefault("backend", "cgal")
+    backend_info.setdefault("optimal", True)
+    backend_info["cli_path"] = str(cli_path)
+    backend_info["piece_count"] = int(len(pieces))
+    return pieces, backend_info
+
+
+def _run_cgal_cut_open_bridge_sets(
+    geometry: Polygon,
+    bridge_sets: Sequence[BridgeSet],
+    candidates_by_id: Dict[int, BridgeCandidate],
+    *,
+    config: BridgedPartitionConfig,
+) -> Tuple[List[Polygon], Dict[str, object], BridgeSet, List[Point2D]] | None:
+    if not bridge_sets:
+        return None
+    if _find_cgal_cli(config) is None:
+        return None
+
+    best: Tuple[Tuple[object, ...], List[Polygon], Dict[str, object], BridgeSet, List[Point2D]] | None = None
+    rejected: List[Dict[str, object]] = []
+    attempts = 0
+    for bridge_set in bridge_sets[: config.max_bridge_sets]:
+        attempts += 1
+        cut_geometry, cut_metadata = _cut_open_geometry_with_slits(
+            geometry,
+            bridge_set,
+            candidates_by_id,
+            config=config,
+        )
+        if cut_geometry is None:
+            rejected.append(
+                {
+                    "bridge_ids": list(bridge_set.bridge_ids),
+                    "reason": cut_metadata.get("reject_reason", "invalid cut geometry"),
+                }
+            )
+            continue
+
+        simple_ring = _polygon_outer_vertices(cut_geometry)
+        try:
+            cgal_result = _run_cgal_cli(simple_ring, config=config)
+        except RuntimeError as error:
+            rejected.append({"bridge_ids": list(bridge_set.bridge_ids), "reason": str(error)})
+            continue
+        if cgal_result is None:
+            return None
+
+        cut_pieces, backend_info = cgal_result
+        bridges = _bridge_candidates_for_set(bridge_set, candidates_by_id)
+        snap_eps = max(float(cut_metadata["cut_slit_distance"]) * 4.0, config.validity_eps * 10.0)
+        snapped_pieces = [
+            snapped
+            for piece in cut_pieces
+            if (snapped := _snap_piece_to_bridge_lines(piece, bridges, snap_eps=snap_eps, config=config)) is not None
+        ]
+        validation = validate_bridged_partition(geometry, snapped_pieces, config=config)
+        score = (
+            0 if validation["is_valid"] else 1,
+            int(len(snapped_pieces)),
+            float(bridge_set.total_length),
+            int(_sum_piece_vertices(snapped_pieces)),
+            -float(validation["iou"]),
+        )
+        candidate_backend = dict(backend_info)
+        candidate_backend.update(
+            {
+                "backend": "cgal_bridge_cut",
+                "optimal": bool(validation["is_valid"]),
+                "simple_polygon_backend": "cgal",
+                "simple_polygon_optimal": True,
+                "optimal_scope": "selected_bridge_cut_simple_polygon",
+                "global_optimal": False,
+                "bridge_cut_mode": "epsilon_slit_snap_v1",
+                "bridge_policy": "outer_star_v1",
+                "cut_metadata": cut_metadata,
+                "snap_eps": float(snap_eps),
+                "pre_snap_piece_count": int(len(cut_pieces)),
+                "post_snap_piece_count": int(len(snapped_pieces)),
+                "selection_score": [float(value) if isinstance(value, float) else int(value) for value in score],
+            }
+        )
+        if rejected:
+            candidate_backend["rejected_bridge_sets"] = rejected[:16]
+
+        if best is None or score < best[0]:
+            best = (score, snapped_pieces, candidate_backend, bridge_set, simple_ring)
+            if validation["is_valid"] and len(snapped_pieces) == 1:
+                break
+
+    if best is None:
+        return None
+    _, pieces, backend_info, bridge_set, simple_ring = best
+    backend_info["evaluated_bridge_set_count"] = int(attempts)
+    backend_info["rejected_bridge_set_count"] = int(len(rejected))
+    if rejected:
+        backend_info.setdefault("rejected_bridge_sets", rejected[:16])
+    return pieces, backend_info, bridge_set, simple_ring
 
 
 def run_simple_polygon_convex_partition(
@@ -420,9 +727,6 @@ def run_simple_polygon_convex_partition(
         raise ValueError(f"Unsupported backend: {config.backend}")
 
     has_holes = len(original_geometry.interiors) > 0
-    if config.backend == "cgal" and has_holes:
-        raise RuntimeError("CGAL backend for cut-open polygons with holes is not implemented in outer_star_v1.")
-
     if config.backend in {"auto", "cgal"} and not has_holes:
         cgal_result = _run_cgal_cli(simple_ring, config=config)
         if cgal_result is not None:
@@ -499,22 +803,40 @@ def bridged_optimal_convex_partition(
     bridge_sets = enumerate_outer_star_bridge_sets(candidates, hole_count=hole_count, config=config)
     candidates_by_id = {candidate.id: candidate for candidate in candidates}
 
-    if not bridge_sets:
-        selected_bridge_set = None
-        simple_ring = _polygon_outer_vertices(geometry)
-    else:
-        selected_bridge_set = bridge_sets[0]
-        simple_ring = (
-            _polygon_outer_vertices(geometry)
-            if hole_count == 0
-            else build_outer_star_boundary_walk(geometry, selected_bridge_set, candidates_by_id)
-        )
+    selected_bridge_set: BridgeSet | None = None
+    simple_ring = _polygon_outer_vertices(geometry)
+    pieces: List[Polygon] | None = None
+    backend_info: Dict[str, object] | None = None
 
-    pieces, backend_info = run_simple_polygon_convex_partition(
-        simple_ring,
-        original_geometry=geometry,
-        config=config,
-    )
+    if hole_count > 0 and config.backend in {"auto", "cgal"}:
+        cut_result = _run_cgal_cut_open_bridge_sets(
+            geometry,
+            bridge_sets,
+            candidates_by_id,
+            config=config,
+        )
+        if cut_result is not None:
+            pieces, backend_info, selected_bridge_set, simple_ring = cut_result
+        elif config.backend == "cgal":
+            raise RuntimeError("CGAL bridge cut backend failed for all bridge sets.")
+
+    if pieces is None or backend_info is None:
+        if not bridge_sets:
+            selected_bridge_set = None
+            simple_ring = _polygon_outer_vertices(geometry)
+        else:
+            selected_bridge_set = bridge_sets[0]
+            simple_ring = (
+                _polygon_outer_vertices(geometry)
+                if hole_count == 0
+                else build_outer_star_boundary_walk(geometry, selected_bridge_set, candidates_by_id)
+            )
+
+        pieces, backend_info = run_simple_polygon_convex_partition(
+            simple_ring,
+            original_geometry=geometry,
+            config=config,
+        )
     validation = validate_bridged_partition(geometry, pieces, config=config)
     primitives = [_primitive_payload(index, piece) for index, piece in enumerate(pieces)]
 
@@ -522,6 +844,7 @@ def bridged_optimal_convex_partition(
         "method": "bridged_optimal_convex_partition",
         "bridge_policy": "outer_star_v1",
         "backend_info": backend_info,
+        "hole_count": int(hole_count),
         "bridge_candidates": [_bridge_candidate_payload(candidate) for candidate in candidates],
         "selected_bridge_set": _bridge_set_payload(selected_bridge_set),
         "available_bridge_set_count": int(len(bridge_sets)),

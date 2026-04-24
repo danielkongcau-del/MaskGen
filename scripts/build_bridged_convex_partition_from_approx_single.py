@@ -25,6 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vertex-round-digits", type=int, default=8)
     parser.add_argument("--area-eps", type=float, default=1e-8)
     parser.add_argument("--validity-eps", type=float, default=1e-7)
+    parser.add_argument("--cut-slit-scale", type=float, default=1e-6)
     return parser.parse_args()
 
 
@@ -49,6 +50,7 @@ def main() -> None:
             vertex_round_digits=args.vertex_round_digits,
             area_eps=args.area_eps,
             validity_eps=args.validity_eps,
+            cut_slit_scale=args.cut_slit_scale,
             backend=args.backend,
             cgal_cli=args.cgal_cli,
         ),

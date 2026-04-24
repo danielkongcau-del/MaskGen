@@ -28,7 +28,7 @@ The long-term target is an optimal convex partition backend, preferably CGAL's `
 
 ## Current v1
 
-The current implementation is a Python framework plus fallback backend.
+The current implementation is a Python framework plus a CGAL CLI backend for simple polygons without holes.
 
 Supported:
 
@@ -38,13 +38,14 @@ Supported:
 - bridge metadata in output JSON
 - boundary-walk metadata for visualization
 - validation of convex pieces
+- CGAL `optimal_convex_partition_2` backend for simple polygons with `hole_count == 0`
+- CGAL bridge-cut backend for polygons with holes using `epsilon_slit_snap_v1`
 - fallback to current CDT + greedy convex merge
 
 Not yet implemented:
 
 - general bridge tree cut-open traversal
-- CGAL CLI integration
-- true optimal convex partition on polygons with holes
+- globally optimal bridge-tree selection for polygons with holes
 
 ## Backend Behavior
 
@@ -59,12 +60,44 @@ Fallback output must not be interpreted as optimal.
 
 If `backend=cgal` is explicitly requested and the CLI is not available, the script fails with a clear error.
 
+For polygons with holes, v1 uses `outer_star_v1` bridges, opens them with a very narrow slit, runs CGAL on the resulting simple polygon, then snaps slit-boundary vertices back to the original bridge centerline. The result is validated against the original polygon-with-holes.
+
+The hole path records:
+
+```text
+backend = cgal_bridge_cut
+bridge_cut_mode = epsilon_slit_snap_v1
+simple_polygon_optimal = true
+optimal_scope = selected_bridge_cut_simple_polygon
+global_optimal = false
+```
+
+This means CGAL is optimal for the selected cut-open simple polygon. It does not yet claim global optimality over all possible bridge trees.
+
+## Build CGAL Backend
+
+On Windows, use MSVC plus vcpkg:
+
+```powershell
+cmd /c 'call "D:\Microsoft Visual Studio\VC\Auxiliary\Build\vcvars64.bat" && cmake -Wno-dev -S tools -B build\cgal_tools -G "Visual Studio 18 2026" -A x64 -DCMAKE_TOOLCHAIN_FILE=D:\vcpkg\scripts\buildsystems\vcpkg.cmake && cmake --build build\cgal_tools --config Release'
+```
+
+The expected executable is:
+
+```text
+build/cgal_tools/Release/optimal_convex_partition_cli.exe
+```
+
+`partition_gen/bridged_convex_partition.py` searches this location automatically before falling back.
+
 ## Files
 
 ```text
 partition_gen/bridged_convex_partition.py
 scripts/build_bridged_convex_partition_from_approx_single.py
 scripts/visualize_bridged_convex_partition.py
+tools/optimal_convex_partition_cli.cpp
+tools/CMakeLists.txt
 ```
 
 ## Example
@@ -94,6 +127,8 @@ Important payload fields:
 - `selected_bridge_set`
 - `simple_polygon_vertex_count`
 - `simple_polygon_boundary_walk`
+- `backend_info.bridge_cut_mode`
+- `backend_info.optimal_scope`
 - `primitives`
 - `validation`
 
@@ -124,3 +159,7 @@ The validation block reports:
 - `piece_count`
 
 For fallback results, `validation.iou` should still be close to `1`, but `backend_info.optimal` remains `false`.
+
+For `cgal_bridge_cut`, `validation.iou` is computed against the original polygon with holes after snapping slit edges back to the bridge centerline.
+
+`--cut-slit-scale` controls only the numerical width of the temporary slit used to make the polygon strictly simple for CGAL. It is not a semantic geometry threshold; the slit edges are snapped back before validation/output.

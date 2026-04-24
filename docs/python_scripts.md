@@ -172,7 +172,11 @@ Implements constrained triangulation and greedy convex merging.
 
 ### `partition_gen/bridged_convex_partition.py`
 
-Implements the experimental bridged convex partition framework. It keeps the geometry approximator fixed, enumerates bridge candidates for holes, and dispatches to an optimal backend when available or to the explicit non-optimal fallback.
+Implements the experimental bridged convex partition framework. It keeps the geometry approximator fixed, enumerates bridge candidates for holes, dispatches simple no-hole polygons to the CGAL CLI, and uses `epsilon_slit_snap_v1` to run CGAL on cut-open polygons with holes when available. If CGAL is unavailable, it uses the explicit non-optimal fallback.
+
+### `tools/optimal_convex_partition_cli.cpp`
+
+Standalone C++ CLI built with CGAL. It reads a JSON file with an `outer` simple polygon boundary, runs `CGAL::optimal_convex_partition_2`, and writes convex pieces as JSON. It is currently only for simple polygons without holes.
 
 ### `partition_gen/primitive_decomposition.py`
 

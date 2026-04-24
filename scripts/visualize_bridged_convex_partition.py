@@ -133,7 +133,7 @@ def main() -> None:
     if len(walk) >= 2:
         walk_points = np.asarray(walk + [walk[0]], dtype=np.float32)
         axes[2].plot(walk_points[:, 0], walk_points[:, 1], color="#8e44ad", linewidth=1.5)
-    axes[2].set_title(f"C. Bridge boundary walk\nvertices={payload['simple_polygon_vertex_count']}", fontsize=10)
+    axes[2].set_title(f"C. CGAL simple boundary\nvertices={payload['simple_polygon_vertex_count']}", fontsize=10)
 
     axes[3].imshow(mask_to_rgb(mask), alpha=0.18)
     draw_polygon(axes[3], payload["outer"], payload["holes"], facecolor="none", edgecolor="black", linewidth=1.2, alpha=1.0)
