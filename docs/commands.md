@@ -77,6 +77,27 @@ Output:
 data/remote_256_convex_partition_from_approx_debug/val/graphs/83_face16.json
 ```
 
+## Build Bridged Convex Partition From Geometry Approximation
+
+This branch records bridge candidates for holes and then uses an optimal backend when available. If CGAL is not available, it falls back to the current CDT + greedy convex merge and marks `optimal=false`.
+
+```powershell
+conda run -n lmf python scripts/build_bridged_convex_partition_from_approx_single.py `
+  --approx-json data/remote_256_geometry_approx_debug/val/graphs/83_face16.json `
+  --output data/remote_256_bridged_convex_partition_debug/val/graphs/83_face16.json
+```
+
+## Visualize Bridged Convex Partition
+
+```powershell
+conda run -n lmf python scripts/visualize_bridged_convex_partition.py `
+  --partition-json data/remote_256_bridged_convex_partition_debug/val/graphs/83_face16.json `
+  --mask-root data/remote_256 `
+  --split val `
+  --stem 83 `
+  --output outputs/visualizations/face83_16_bridged_convex_partition.png
+```
+
 ## Visualize Convex Partition
 
 ```powershell

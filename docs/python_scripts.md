@@ -26,7 +26,13 @@ Visualizes one geometry approximator output.
 
 Runs constrained triangulation and greedy convex merge on one geometry approximator output.
 
-This is the current preferred entrypoint for convex primitive extraction.
+This is the stable CDT + greedy baseline for convex primitive extraction.
+
+### `scripts/build_bridged_convex_partition_from_approx_single.py`
+
+Builds the experimental bridged convex partition from one geometry approximator output.
+
+It records bridge candidates and selected bridges for holes. If no CGAL optimal backend is available, it falls back to the current CDT + greedy convex merge and marks the result as non-optimal.
 
 ### `scripts/build_convex_partition_single.py`
 
@@ -37,6 +43,10 @@ Useful for comparison against the approximator path.
 ### `scripts/visualize_convex_partition.py`
 
 Visualizes one convex partition result, including source face, triangulation, and final convex primitives.
+
+### `scripts/visualize_bridged_convex_partition.py`
+
+Visualizes one bridged convex partition result, including selected bridges, boundary walk metadata, and final convex pieces.
 
 ## Supporting Or Experimental Dataset Scripts
 
@@ -159,6 +169,10 @@ Implements the geometry approximator used before CDT.
 ### `partition_gen/convex_partition.py`
 
 Implements constrained triangulation and greedy convex merging.
+
+### `partition_gen/bridged_convex_partition.py`
+
+Implements the experimental bridged convex partition framework. It keeps the geometry approximator fixed, enumerates bridge candidates for holes, and dispatches to an optimal backend when available or to the explicit non-optimal fallback.
 
 ### `partition_gen/primitive_decomposition.py`
 
