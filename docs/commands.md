@@ -63,6 +63,89 @@ conda run -n lmf python scripts/visualize_geometry_approx.py `
   --output outputs/visualizations/face83_16_geometry_approx.png
 ```
 
+## Build Full-Image Shared-Arc Approximation
+
+This builds a global planar approximation where adjacent faces reference the same maximal boundary arcs. Shared arcs are transferred from one face-level geometry approximation when the replacement keeps the full-image map valid.
+
+```powershell
+conda run -n lmf python scripts/build_global_approx_partition_single.py `
+  --partition-graph data/remote_256_partition/val/graphs/83.json `
+  --output outputs/visualizations/global_approx_val83.json `
+  --face-simplify-tolerance 1.5
+```
+
+## Visualize Full-Image Shared-Arc Approximation
+
+```powershell
+conda run -n lmf python scripts/visualize_global_approx_partition.py `
+  --global-json outputs/visualizations/global_approx_val83.json `
+  --mask-root data/remote_256 `
+  --split val `
+  --stem 83 `
+  --output outputs/visualizations/global_approx_val83.png
+```
+
+## Regularize Full-Image Arcs
+
+This straightens staircase-like shared arcs while keeping arc endpoints fixed and accepting only replacements that pass full-image validation.
+
+```powershell
+conda run -n lmf python scripts/build_regularized_global_approx_single.py `
+  --global-json outputs/visualizations/global_approx_val37_risk.json `
+  --partition-graph data/remote_256_partition/val/graphs/37.json `
+  --output outputs/visualizations/global_approx_val37_regularized.json `
+  --simplify-tolerance 1.25 `
+  --max-distance 1.25
+```
+
+More aggressive cleanup, allowing larger local semantic boundary movement:
+
+```powershell
+conda run -n lmf python scripts/build_regularized_global_approx_single.py `
+  --global-json outputs/visualizations/global_approx_val37_risk.json `
+  --partition-graph data/remote_256_partition/val/graphs/37.json `
+  --output outputs/visualizations/global_approx_val37_regularized_aggressive.json `
+  --simplify-tolerance 1.25 `
+  --max-distance 2.0 `
+  --max-subsegment-span 96 `
+  --max-candidates-per-arc 96 `
+  --enable-face-chain-smoothing `
+  --face-chain-max-distance 2.0 `
+  --face-chain-max-span 96
+```
+
+More aggressive cleanup when small semantic boundary shifts are acceptable:
+
+```powershell
+conda run -n lmf python scripts/build_regularized_global_approx_single.py `
+  --global-json outputs/visualizations/global_approx_val37_risk.json `
+  --partition-graph data/remote_256_partition/val/graphs/37.json `
+  --output outputs/visualizations/global_approx_val37_regularized_semantic_loss.json `
+  --simplify-tolerance 1.5 `
+  --max-distance 2.5 `
+  --max-subsegment-span 128 `
+  --max-candidates-per-arc 128 `
+  --enable-face-chain-smoothing `
+  --face-chain-max-distance 3.5 `
+  --face-chain-max-span 128 `
+  --max-face-chain-candidates 1024 `
+  --enable-strip-face-smoothing `
+  --strip-min-aspect-ratio 3.0 `
+  --strip-max-width 18.0
+```
+
+## Visualize Arc Regularization
+
+```powershell
+conda run -n lmf python scripts/visualize_global_arc_regularization.py `
+  --before-json outputs/visualizations/global_approx_val37_risk.json `
+  --after-json outputs/visualizations/global_approx_val37_regularized.json `
+  --mask-root data/remote_256 `
+  --split val `
+  --stem 37 `
+  --output outputs/visualizations/global_approx_val37_regularized.png
+```
+
 ## Build Convex Partition From Geometry Approximation
 
 ```powershell

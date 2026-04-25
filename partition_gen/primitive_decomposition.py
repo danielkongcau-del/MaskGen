@@ -1197,35 +1197,36 @@ def _shared_boundary_length(polygon_a: Polygon, polygon_b: Polygon) -> float:
 
 def merge_triangles_to_quads(polygons: Sequence[Polygon], *, area_epsilon: float = 1e-3) -> List[Polygon]:
     active = [orient(polygon, sign=1.0) for polygon in polygons if float(polygon.area) > area_epsilon]
+    triangle_indices = [
+        index for index, polygon in enumerate(active) if _primitive_type_from_polygon(polygon) == "triangle"
+    ]
+    candidates: List[Tuple[int, int, Polygon, float]] = []
 
-    changed = True
-    while changed:
-        changed = False
-        best_pair: Tuple[int, int, Polygon, float] | None = None
-        for index_a in range(len(active)):
-            polygon_a = active[index_a]
-            if _primitive_type_from_polygon(polygon_a) != "triangle":
+    for left_offset, index_a in enumerate(triangle_indices):
+        polygon_a = active[index_a]
+        for index_b in triangle_indices[left_offset + 1 :]:
+            polygon_b = active[index_b]
+            shared = _shared_boundary_length(polygon_a, polygon_b)
+            if shared <= area_epsilon:
                 continue
-            for index_b in range(index_a + 1, len(active)):
-                polygon_b = active[index_b]
-                if _primitive_type_from_polygon(polygon_b) != "triangle":
-                    continue
-                merged = _can_merge_to_quad(polygon_a, polygon_b, area_epsilon=area_epsilon)
-                if merged is None:
-                    continue
-                shared = _shared_boundary_length(polygon_a, polygon_b)
-                score = shared + float(merged.area)
-                if best_pair is None or score > best_pair[3]:
-                    best_pair = (index_a, index_b, merged, score)
-        if best_pair is None:
-            break
-        index_a, index_b, merged, _ = best_pair
-        kept = [polygon for idx, polygon in enumerate(active) if idx not in (index_a, index_b)]
-        kept.append(merged)
-        active = kept
-        changed = True
+            merged = _can_merge_to_quad(polygon_a, polygon_b, area_epsilon=area_epsilon)
+            if merged is None:
+                continue
+            score = shared + float(merged.area)
+            candidates.append((index_a, index_b, merged, score))
 
-    return active
+    candidates.sort(key=lambda item: (-float(item[3]), int(item[0]), int(item[1])))
+    used_indices: set[int] = set()
+    merged_pieces: List[Polygon] = []
+    for index_a, index_b, merged, _ in candidates:
+        if index_a in used_indices or index_b in used_indices:
+            continue
+        used_indices.add(index_a)
+        used_indices.add(index_b)
+        merged_pieces.append(merged)
+
+    kept = [polygon for index, polygon in enumerate(active) if index not in used_indices]
+    return kept + merged_pieces
 
 
 def face_geometry(graph_data: Dict[str, object], face_data: Dict[str, object]) -> Polygon:

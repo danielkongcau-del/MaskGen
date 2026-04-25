@@ -22,6 +22,36 @@ It uses the old base primitive decomposition as a geometry approximation tool, u
 
 Visualizes one geometry approximator output.
 
+### `scripts/build_global_approx_partition_single.py`
+
+Builds a full-image shared-arc approximation from one partition graph JSON.
+
+It merges small partition edges into maximal boundary chains by incident face pair, runs the face-level geometry approximator, transfers owner-face simplified boundary segments into shared arcs when full-image validation allows it, and reconstructs every face ring from shared arc references.
+
+### `scripts/visualize_global_approx_partition.py`
+
+Visualizes one full-image shared-arc approximation.
+
+It displays the original mask, shared arcs, reconstructed approximate faces, and an overlay for topology/planarity inspection.
+
+### `scripts/build_regularized_global_approx_single.py`
+
+Runs the global arc regularizer on one full-image shared-arc approximation JSON.
+
+The default mode straightens only near-linear staircase-like arcs, keeps arc endpoints fixed, and accepts a replacement only if full-image validation still passes.
+
+It also supports subsegment smoothing inside longer arcs, so local staircase artifacts can be removed without flattening the whole boundary.
+
+Optional face-chain smoothing handles staircases that cross arc boundaries or junctions. It now applies to both outer rings and hole rings, which is important for white/road-like regions whose jagged edges appear as internal boundaries of a larger face.
+
+Optional strip-face smoothing is experimental. It snaps a whole thin elongated face to a rotated rectangle and should only be used for high-confidence strip-like regions; complex road networks still need face-chain or future local strip-segment regularization.
+
+### `scripts/visualize_global_arc_regularization.py`
+
+Visualizes one before/after arc regularization pair.
+
+It displays the original mask, pre-regularization arcs, post-regularization arcs, and highlighted changed arcs.
+
 ### `scripts/build_convex_partition_from_approx_single.py`
 
 Runs constrained triangulation and greedy convex merge on one geometry approximator output.
@@ -191,6 +221,20 @@ Implements constrained triangulation and greedy convex merging.
 ### `partition_gen/bridged_convex_partition.py`
 
 Implements the experimental bridged convex partition framework. It keeps the geometry approximator fixed, enumerates bridge candidates for holes, dispatches simple no-hole polygons to the CGAL CLI, and uses `epsilon_slit_snap_v1` to run CGAL on cut-open polygons with holes when available. If CGAL is unavailable, it uses the explicit non-optimal fallback.
+
+### `partition_gen/global_approx_partition.py`
+
+Implements the full-image shared-arc approximation branch.
+
+It extracts maximal boundary chains, builds owner-face boundary candidates from the existing geometry approximator, greedily accepts only globally valid boundary transfers, reconstructs all face polygons from shared arc references, and reports adjacency/gap/overlap validation metrics.
+
+### `partition_gen/global_arc_regularizer.py`
+
+Implements topology-safe smoothing for full-image shared arcs.
+
+It regularizes staircase-like arcs after global approximation, rebuilds all face rings, and accepts only changes that preserve full-image validity.
+
+The default path searches straightenable full arcs and straightenable subsegments. Optional face-chain smoothing, strip-face smoothing, and polyline smoothing are exposed for more aggressive cleanup experiments.
 
 ### `tools/optimal_convex_partition_cli.cpp`
 
