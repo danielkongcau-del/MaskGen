@@ -4,9 +4,10 @@ from dataclasses import asdict
 from typing import Dict, List, Sequence, Tuple
 
 from partition_gen.explainer import ExplainerConfig, build_explanation_payload
-from partition_gen.operation_candidates import propose_operation_candidates
+from partition_gen.operation_candidates import propose_operation_candidates_with_diagnostics
 from partition_gen.operation_costs import score_operation_candidates
 from partition_gen.operation_patches import build_operation_patches
+from partition_gen.operation_proxy_validation import validate_selected_operations_proxy
 from partition_gen.operation_selector import select_operations_with_ortools
 from partition_gen.operation_types import (
     RESIDUAL,
@@ -58,6 +59,12 @@ def _candidate_public(candidate: OperationCandidate) -> Dict[str, object]:
         "valid": bool(candidate.valid),
         "failure_reason": candidate.failure_reason,
         "metadata": _sanitize_metadata(candidate.metadata),
+        "latent_policy": (
+            candidate.metadata.get("latent_geometry", {}).get("policy")
+            if candidate.metadata and isinstance(candidate.metadata.get("latent_geometry"), dict)
+            else None
+        ),
+        "false_cover": candidate.cost_breakdown.get("false_cover", {}) if candidate.cost_breakdown else {},
         "cost_breakdown": candidate.cost_breakdown,
     }
 
@@ -223,7 +230,13 @@ def build_operation_explanation_payload(
     )
 
     patches = build_operation_patches(evidence_payload, role_prior_payload, pairwise_prior_payload, config)
-    candidates = propose_operation_candidates(evidence_payload, patches, role_prior_payload, pairwise_prior_payload, config)
+    candidates, candidate_generation_diagnostics = propose_operation_candidates_with_diagnostics(
+        evidence_payload,
+        patches,
+        role_prior_payload,
+        pairwise_prior_payload,
+        config,
+    )
     candidates = score_operation_candidates(candidates, evidence_payload, config)
     selection = select_operations_with_ortools(candidates, _face_ids(evidence_payload), config)
     candidate_by_id = {candidate.id: candidate for candidate in candidates}
@@ -231,6 +244,8 @@ def build_operation_explanation_payload(
 
     nodes, relations, residuals, generated_nodes_by_candidate, generated_relations_by_candidate = _normalise_selected_parse_graph(selected_candidates)
     validation = _validate(evidence_payload, selected_candidates, nodes, relations)
+    proxy_validation = validate_selected_operations_proxy(selected_candidates, evidence_payload, config)
+    validation["proxy_validation"] = proxy_validation
     selected_operations = _selected_operations(selected_candidates, generated_nodes_by_candidate, generated_relations_by_candidate)
 
     operation_histogram: Dict[str, int] = {}
@@ -246,11 +261,18 @@ def build_operation_explanation_payload(
     total_independent = sum(float(candidate.independent_cost) for candidate in selected_candidates)
     total_operation = sum(float(candidate.operation_cost) for candidate in selected_candidates)
     total_gain = sum(float(candidate.compression_gain) for candidate in selected_candidates)
+    false_cover_area_total = sum(float(candidate.cost_breakdown.get("false_cover", {}).get("area", 0.0)) for candidate in selected_candidates)
+    false_cover_ratio_max = max(
+        [float(candidate.cost_breakdown.get("false_cover", {}).get("ratio", 0.0)) for candidate in selected_candidates] or [0.0]
+    )
 
     valid_candidates = [candidate for candidate in candidates if candidate.valid]
     top_candidates = sorted(valid_candidates, key=lambda item: (-float(item.compression_gain), item.operation_type, item.id))[:50]
     candidate_summary = {
         "candidate_count": int(len(candidates)),
+        "raw_candidate_count": int(candidate_generation_diagnostics["raw_candidate_count"]),
+        "deduplicated_candidate_count": int(candidate_generation_diagnostics["deduplicated_candidate_count"]),
+        "dropped_duplicate_count": int(candidate_generation_diagnostics["dropped_duplicate_count"]),
         "valid_candidate_count": int(len(valid_candidates)),
         "invalid_candidate_count": int(len(candidates) - len(valid_candidates)),
         "selected_candidate_ids": list(selection.selected_candidate_ids),
@@ -280,15 +302,23 @@ def build_operation_explanation_payload(
     }
 
     diagnostics = {
+        "cost_profile": config.cost_profile,
         "face_count": int(len(faces_by_id)),
         "patch_count": int(len(patches)),
         "candidate_count": int(len(candidates)),
         "selected_operation_count": int(len(selected_candidates)),
+        "raw_candidate_count": int(candidate_generation_diagnostics["raw_candidate_count"]),
+        "deduplicated_candidate_count": int(candidate_generation_diagnostics["deduplicated_candidate_count"]),
+        "dropped_duplicate_count": int(candidate_generation_diagnostics["dropped_duplicate_count"]),
         "residual_face_count": int(len(selection.residual_face_ids)),
+        "selected_non_residual_count": int(sum(1 for candidate in selected_candidates if candidate.operation_type != RESIDUAL)),
+        "selected_residual_count": int(sum(1 for candidate in selected_candidates if candidate.operation_type == RESIDUAL)),
         "residual_area_ratio": float(residual_area / total_area) if total_area > config.min_area_eps else 0.0,
         "total_independent_cost": float(total_independent),
         "total_operation_cost": float(total_operation),
         "total_compression_gain": float(total_gain),
+        "false_cover_area_total": float(false_cover_area_total),
+        "false_cover_ratio_max": float(false_cover_ratio_max),
         "selection_method": selection.selection_method,
         "solver_status": selection.solver_status,
         "global_optimal": bool(selection.global_optimal),

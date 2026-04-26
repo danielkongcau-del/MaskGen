@@ -192,6 +192,11 @@ def main() -> None:
 
     axes[3].imshow(np.full_like(rgb, 255))
     graph = operation.get("generator_target", {}).get("parse_graph", {})
+    false_cover_faces = set()
+    for item in operation.get("selected_operations", []):
+        false_cover = item.get("cost", {}).get("breakdown", {}).get("false_cover", {})
+        if float(false_cover.get("area", 0.0) or 0.0) > 0.0:
+            false_cover_faces.update(int(value) for value in item.get("evidence", {}).get("face_ids", []))
     for node in graph.get("nodes", []):
         role = str(node.get("role", ""))
         evidence_info = node.get("evidence", {})
@@ -201,15 +206,18 @@ def main() -> None:
             if not face:
                 continue
             geometry = face["geometry"]
-            draw_polygon(axes[3], geometry["outer"], geometry["holes"], facecolor=color, edgecolor="black", linewidth=0.35, alpha=0.35)
+            edgecolor = "red" if int(face_id) in false_cover_faces else "black"
+            linewidth = 0.8 if int(face_id) in false_cover_faces else 0.35
+            draw_polygon(axes[3], geometry["outer"], geometry["holes"], facecolor=color, edgecolor=edgecolor, linewidth=linewidth, alpha=0.35)
             centroid = face.get("features", {}).get("centroid")
             if centroid:
                 axes[3].text(centroid[0], centroid[1], role.replace("_region", "").replace("_object", "")[:3], fontsize=4, ha="center")
     diagnostics = operation.get("diagnostics", {})
     axes[3].set_title(
         "D. Selected operations\n"
-        f"ops={diagnostics.get('selected_operation_count')}, residual={diagnostics.get('residual_face_count')}, "
-        f"gain={diagnostics.get('total_compression_gain', 0.0):.1f}",
+        f"ops={diagnostics.get('selected_operation_count')}, residual={diagnostics.get('residual_area_ratio', 0.0):.3f}, "
+        f"gain={diagnostics.get('total_compression_gain', 0.0):.1f}, false={diagnostics.get('false_cover_ratio_max', 0.0):.3f}\n"
+        f"{diagnostics.get('selection_method')}, optimal={diagnostics.get('global_optimal')}",
         fontsize=10,
     )
 

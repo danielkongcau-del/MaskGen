@@ -59,6 +59,8 @@ def _greedy_select(
         selection_method="greedy_fallback",
         global_optimal=False,
         diagnostics={
+            "cost_profile": config.cost_profile,
+            "objective_scale": int(1 if config.cost_profile == "token_length_v1" else config.objective_scale),
             "covered_face_count": int(len(covered)),
             "all_face_count": int(len(set(int(value) for value in all_face_ids))),
             "fallback_reason": reason,
@@ -98,8 +100,9 @@ def select_operations_with_ortools(
         model.Add(sum(covering) == 1)
 
     objective_terms = []
+    objective_scale = 1 if config.cost_profile == "token_length_v1" else config.objective_scale
     for candidate in candidates:
-        gain = int(round(float(candidate.compression_gain) * config.objective_scale))
+        gain = int(round(float(candidate.compression_gain) * objective_scale))
         if gain != 0:
             objective_terms.append(gain * variables[candidate.id])
     model.Maximize(sum(objective_terms) if objective_terms else 0)
@@ -132,6 +135,8 @@ def select_operations_with_ortools(
         selection_method="ortools_cp_sat",
         global_optimal=bool(status == cp_model.OPTIMAL),
         diagnostics={
+            "cost_profile": config.cost_profile,
+            "objective_scale": int(objective_scale),
             "num_conflicts": int(solver.NumConflicts()),
             "num_branches": int(solver.NumBranches()),
             "wall_time": float(solver.WallTime()),

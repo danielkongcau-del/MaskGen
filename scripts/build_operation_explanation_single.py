@@ -21,6 +21,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-candidates-per-patch", type=int, default=16)
     parser.add_argument("--min-compression-gain", type=float, default=0.0)
     parser.add_argument("--ortools-time-limit-seconds", type=float, default=10.0)
+    parser.add_argument("--cost-profile", type=str, default="token_length_v1", choices=["heuristic_v1", "token_length_v1"])
     parser.add_argument("--disable-overlay-insert", action="store_true")
     parser.add_argument("--disable-divide-by-region", action="store_true")
     parser.add_argument("--disable-parallel-supports", action="store_true")
@@ -52,6 +53,7 @@ def main() -> None:
             max_candidates_per_patch=args.max_candidates_per_patch,
             min_compression_gain=args.min_compression_gain,
             ortools_time_limit_seconds=args.ortools_time_limit_seconds,
+            cost_profile=args.cost_profile,
             enable_overlay_insert=not args.disable_overlay_insert,
             enable_divide_by_region=not args.disable_divide_by_region,
             enable_parallel_supports=not args.disable_parallel_supports,

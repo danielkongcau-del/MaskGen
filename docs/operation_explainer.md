@@ -156,3 +156,139 @@ conda run -n lmf python scripts/visualize_operation_explanation.py `
   --evidence-json outputs/visualizations/explanation_evidence_val83.json `
   --output outputs/visualizations/operation_explanation_val83.png
 ```
+
+## 9. v1.1 改进
+
+`operation_level_mdl_v1` 的 v1.1 重点不是新增操作类型，而是让候选代价和诊断更可信。
+
+### 9.1 节点对象代价
+
+非 residual 操作的 `operation_cost` 现在不再只计算 template、geometry 和 relation。它还会计算每个高层节点自身的对象代价：
+
+- `support_region`
+- `divider_region`
+- `insert_object`
+- `insert_object_group`
+- `residual_region`
+
+其中 `insert_object_group` 默认使用较低的 `cost_group_object`，其余节点默认使用 `cost_object`。这样可以避免 `OVERLAY_INSERT`、`DIVIDE_BY_REGION`、`PARALLEL_SUPPORTS` 因缺少对象成本而被系统性低估。
+
+### 9.2 False Cover 惩罚
+
+潜在父区域可能会错误覆盖候选以外的其他 face，尤其是 `convex_hull_fill`。v1.1 会对 latent geometry 做 false-cover 诊断：
+
+```text
+false_cover = latent_geometry ∩ non_covered_faces
+```
+
+诊断会记录：
+
+- 被错误覆盖的面积
+- false-cover ratio
+- 被覆盖的 face id 和 label
+- false-cover cost
+- 是否 hard invalid
+
+这不是 renderer，也不计算 `render_iou`。它只是判断 latent parent geometry 是否明显越界。
+
+### 9.3 Patch 截断保留 Seed
+
+当 patch 超过 `max_patch_size` 时，v1.1 会保证 `seed_face_id` 不被截断。其余 face 按与 seed 的直接邻接、共享边界长度、role prior 相关性和面积相关性排序。patch metadata 会记录：
+
+- `trimmed`
+- `original_face_count`
+- `final_face_count`
+- `dropped_face_ids`
+
+### 9.4 Benchmark
+
+批量评估：
+
+```powershell
+conda run -n lmf python scripts/benchmark_operation_explainer.py `
+  --evidence-root outputs/evidence `
+  --output outputs/benchmarks/operation_explainer.jsonl
+```
+
+汇总：
+
+```powershell
+conda run -n lmf python scripts/summarize_operation_explainer_benchmark.py `
+  --input outputs/benchmarks/operation_explainer.jsonl `
+  --output outputs/benchmarks/operation_explainer.md
+```
+
+benchmark 会统计 residual 比例、操作分布、压缩收益、false-cover、OR-Tools 状态和失败原因。
+
+### 9.5 当前仍然不是最终强解释器
+
+当前版本仍然使用：
+
+```text
+每个 face 恰好被一个 selected operation 覆盖
+```
+
+这意味着它还不能完整表达“同一个 support 同时被道路分隔、又承载房屋嵌入”的多重操作关系。后续版本需要引入：
+
+- `consumed_face_ids`
+- `referenced_face_ids`
+- operation dependency graph
+
+在这些机制实现前，v1.1 的定位是更可信的 operation 候选选择器和诊断器，而不是最终生成程序。
+
+## 10. Cost Profiles
+
+当前支持两个代价模式：
+
+### 10.1 `heuristic_v1`
+
+旧的启发式加权代价，保留用于回归测试和对比。它会把 object、relation、vertex、atom、template、false-cover 等项加权求和。
+
+该模式工程上可诊断，但不是长期稳定目标，因为不同项的量纲并不完全一致。
+
+### 10.2 `token_length_v1`
+
+新的默认模式。它把代价解释为编码长度，也就是描述一个结构大致需要多少个符号 / token。
+
+低层独立描述长度：
+
+```text
+independent_length =
+  semantic_face token
++ polygon tokens
++ convex atom tokens
++ adjacency tokens
+```
+
+高层操作长度：
+
+```text
+operation_length =
+  template tokens
++ node tokens
++ relation tokens
++ geometry tokens
++ residual tokens
++ latent policy tokens
++ exception tokens
+```
+
+压缩收益：
+
+```text
+compression_gain = independent_length - operation_length
+```
+
+这仍然是加法形式，但每一项都尽量使用同一单位：结构编码 token 数，而不是混合量纲的经验权重。
+
+### 10.3 False Cover
+
+在 `token_length_v1` 中，false cover 首先是硬约束和诊断，而不是大权重软惩罚。
+
+如果 latent parent geometry 明显覆盖了候选之外的其他 face：
+
+```text
+false_cover_ratio > false_cover_ratio_invalid
+```
+
+该候选会被标记为 invalid，并增加 exception token。`render_iou` 仍然不会被伪造；当前只输出 proxy validation。

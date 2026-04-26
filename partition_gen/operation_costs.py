@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Dict, List, Sequence, Set
+from typing import Dict, Sequence, Set
 
+from partition_gen.operation_code_length import independent_code_length_for_faces, operation_code_length
+from partition_gen.operation_false_cover import compute_false_cover_diagnostics, compute_false_cover_penalty
 from partition_gen.operation_geometry import polygon_from_face, vertex_count_for_face, vertex_count_for_geometry
 from partition_gen.operation_types import (
     DIVIDE_BY_REGION,
@@ -53,7 +55,7 @@ def _face_independent_cost(face: Dict[str, object], config: OperationExplainerCo
     }
 
 
-def independent_cost_for_faces(
+def heuristic_independent_cost_for_faces(
     face_ids: Sequence[int],
     evidence_payload: Dict[str, object],
     config: OperationExplainerConfig,
@@ -101,6 +103,21 @@ def _geometry_cost_for_node(node: Dict[str, object], config: OperationExplainerC
     return 0.0
 
 
+def node_object_cost(node: Dict[str, object], config: OperationExplainerConfig) -> float:
+    role = str(node.get("role", ""))
+    if role == "insert_object_group":
+        return float(config.cost_group_object)
+    if role == "support_region":
+        return float(config.cost_node_support if config.cost_node_support is not None else config.cost_object)
+    if role == "divider_region":
+        return float(config.cost_node_divider if config.cost_node_divider is not None else config.cost_object)
+    if role == "insert_object":
+        return float(config.cost_node_insert if config.cost_node_insert is not None else config.cost_object)
+    if role == "residual_region":
+        return float(config.cost_node_residual if config.cost_node_residual is not None else config.cost_object)
+    return float(config.cost_node_default if config.cost_node_default is not None else config.cost_object)
+
+
 def _template_cost(operation_type: str, config: OperationExplainerConfig) -> float:
     if operation_type == OVERLAY_INSERT:
         return float(config.cost_template_overlay_insert)
@@ -113,22 +130,45 @@ def _template_cost(operation_type: str, config: OperationExplainerConfig) -> flo
     return float(config.invalid_cost)
 
 
-def _operation_cost(candidate: OperationCandidate, config: OperationExplainerConfig) -> Dict[str, object]:
+def heuristic_operation_cost(candidate: OperationCandidate, config: OperationExplainerConfig, false_cover: Dict[str, object]) -> Dict[str, object]:
     if candidate.operation_type == RESIDUAL:
-        return {"total": 0.0, "template": 0.0, "geometry": 0.0, "relations": 0.0, "latent_geometry": 0.0, "invalid": 0.0}
+        return {
+            "total": 0.0,
+            "template": 0.0,
+            "node_object": 0.0,
+            "node_count": 0,
+            "group_node_count": 0,
+            "geometry": 0.0,
+            "relations": 0.0,
+            "latent_geometry": 0.0,
+            "false_cover": 0.0,
+            "residual": 0.0,
+            "invalid": 0.0,
+        }
     template = _template_cost(candidate.operation_type, config)
+    node_object = sum(node_object_cost(node, config) for node in candidate.nodes)
+    group_node_count = sum(1 for node in candidate.nodes if node.get("role") == "insert_object_group")
     geometry = sum(_geometry_cost_for_node(node, config) for node in candidate.nodes)
     relations = config.cost_relation * len(candidate.relations)
     latent = candidate.metadata.get("latent_geometry", {}) if candidate.metadata else {}
     latent_extra = float(latent.get("extra_cost", 0.0)) if isinstance(latent, dict) else 0.0
+    false_cover_cost = float(false_cover.get("cost", 0.0))
+    metadata_penalty = float(candidate.metadata.get("support_label_diversity_penalty", 0.0)) if candidate.metadata else 0.0
+    residual = sum(float(item.get("area", 0.0)) * config.cost_residual_area for item in candidate.residuals)
     invalid = 0.0 if candidate.valid else config.invalid_cost
-    total = template + geometry + relations + latent_extra + invalid
+    total = template + node_object + geometry + relations + latent_extra + false_cover_cost + metadata_penalty + residual + invalid
     return {
         "total": float(total),
         "template": float(template),
+        "node_object": float(node_object),
+        "node_count": int(len(candidate.nodes)),
+        "group_node_count": int(group_node_count),
         "geometry": float(geometry),
         "relations": float(relations),
         "latent_geometry": float(latent_extra),
+        "false_cover": float(false_cover_cost),
+        "metadata_penalty": float(metadata_penalty),
+        "residual": float(residual),
         "invalid": float(invalid),
     }
 
@@ -153,30 +193,45 @@ def _geometry_validity(candidate: OperationCandidate, evidence_payload: Dict[str
     return True, None
 
 
-def score_operation_candidate(
+def score_operation_candidate_heuristic(
     candidate: OperationCandidate,
     evidence_payload: Dict[str, object],
     config: OperationExplainerConfig,
 ) -> OperationCandidate:
-    independent = independent_cost_for_faces(candidate.covered_face_ids, evidence_payload, config)
+    independent = heuristic_independent_cost_for_faces(candidate.covered_face_ids, evidence_payload, config)
     valid, failure_reason = _geometry_validity(candidate, evidence_payload, config)
     valid = bool(candidate.valid and valid)
     failure_reason = candidate.failure_reason or failure_reason
-    operation = _operation_cost(replace(candidate, valid=valid), config)
+    false_cover = compute_false_cover_penalty(candidate, evidence_payload, config)
+    if bool(false_cover.get("hard_invalid", False)):
+        valid = False
+        failure_reason = failure_reason or "excessive_false_cover"
+    operation = heuristic_operation_cost(replace(candidate, valid=valid), config, false_cover)
     if candidate.operation_type == RESIDUAL:
+        geometry = sum(_geometry_cost_for_node(node, config) for node in candidate.nodes)
+        node_object = sum(node_object_cost(node, config) for node in candidate.nodes)
+        template = float(config.cost_template_residual)
+        total = float(independent["total"])
         operation = {
-            "total": float(independent["total"]),
-            "template": float(config.cost_template_residual),
-            "geometry": float(independent["total"]),
+            "total": total,
+            "template": template,
+            "node_object": float(node_object),
+            "node_count": int(len(candidate.nodes)),
+            "group_node_count": int(sum(1 for node in candidate.nodes if node.get("role") == "insert_object_group")),
+            "geometry": float(geometry),
             "relations": 0.0,
             "latent_geometry": 0.0,
+            "false_cover": 0.0,
+            "residual": max(0.0, total - template - node_object - geometry),
             "invalid": 0.0,
         }
     compression_gain = float(independent["total"]) - float(operation["total"])
     breakdown = {
+        "cost_profile": "heuristic_v1",
         "independent": independent,
         "operation": operation,
         "latent_geometry": _serializable_latent(candidate),
+        "false_cover": false_cover,
         "invalid": float(0.0 if valid else config.invalid_cost),
         "compression_gain": float(compression_gain),
     }
@@ -189,6 +244,76 @@ def score_operation_candidate(
         valid=valid,
         failure_reason=failure_reason,
     )
+
+
+def token_independent_cost_for_faces(
+    face_ids: Sequence[int],
+    evidence_payload: Dict[str, object],
+    config: OperationExplainerConfig,
+) -> Dict[str, object]:
+    return independent_code_length_for_faces(face_ids, evidence_payload, config)
+
+
+def token_operation_cost(
+    candidate: OperationCandidate,
+    evidence_payload: Dict[str, object],
+    config: OperationExplainerConfig,
+) -> Dict[str, object]:
+    return operation_code_length(candidate, evidence_payload, config)
+
+
+def score_operation_candidate_token_length(
+    candidate: OperationCandidate,
+    evidence_payload: Dict[str, object],
+    config: OperationExplainerConfig,
+) -> OperationCandidate:
+    independent = token_independent_cost_for_faces(candidate.covered_face_ids, evidence_payload, config)
+    valid, failure_reason = _geometry_validity(candidate, evidence_payload, config)
+    valid = bool(candidate.valid and valid)
+    failure_reason = candidate.failure_reason or failure_reason
+    false_cover = compute_false_cover_diagnostics(candidate, evidence_payload, config)
+    if bool(false_cover.get("hard_invalid", False)):
+        valid = False
+        failure_reason = failure_reason or "false_cover"
+    scored_candidate = replace(candidate, valid=valid)
+    operation = token_operation_cost(scored_candidate, evidence_payload, config)
+    if bool(false_cover.get("hard_invalid", False)):
+        operation["exception"] = int(operation.get("exception", 0)) + int(config.token_exception)
+        operation["total"] = int(operation.get("total", 0)) + int(config.token_exception)
+    compression_gain = int(independent["total"]) - int(operation["total"])
+    breakdown = {
+        "cost_profile": "token_length_v1",
+        "independent": independent,
+        "operation": operation,
+        "latent_geometry": _serializable_latent(candidate),
+        "false_cover": false_cover,
+        "invalid": int(0 if valid else config.token_exception),
+        "compression_gain": int(compression_gain),
+    }
+    return replace(
+        candidate,
+        independent_cost=float(independent["total"]),
+        operation_cost=float(operation["total"]),
+        compression_gain=float(compression_gain),
+        cost_breakdown=breakdown,
+        valid=valid,
+        failure_reason=failure_reason,
+    )
+
+
+def score_operation_candidate(
+    candidate: OperationCandidate,
+    evidence_payload: Dict[str, object],
+    config: OperationExplainerConfig,
+) -> OperationCandidate:
+    if config.cost_profile == "heuristic_v1":
+        return score_operation_candidate_heuristic(candidate, evidence_payload, config)
+    if config.cost_profile == "token_length_v1":
+        return score_operation_candidate_token_length(candidate, evidence_payload, config)
+    raise ValueError(f"Unsupported operation cost_profile: {config.cost_profile}")
+
+
+independent_cost_for_faces = heuristic_independent_cost_for_faces
 
 
 def _serializable_latent(candidate: OperationCandidate) -> Dict[str, object]:

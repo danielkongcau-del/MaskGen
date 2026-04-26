@@ -14,6 +14,7 @@ OPERATION_TYPES = (OVERLAY_INSERT, DIVIDE_BY_REGION, PARALLEL_SUPPORTS, RESIDUAL
 
 @dataclass(frozen=True)
 class OperationExplainerConfig:
+    cost_profile: str = "token_length_v1"
     max_patch_size: int = 32
     max_candidates_per_patch: int = 16
     min_compression_gain: float = 0.0
@@ -38,8 +39,18 @@ class OperationExplainerConfig:
     cost_vertex: float = 0.35
     cost_atom: float = 1.1
     cost_atom_vertex: float = 0.25
+    cost_group_object: float = 0.75
+    cost_node_support: float | None = None
+    cost_node_divider: float | None = None
+    cost_node_insert: float | None = None
+    cost_node_residual: float | None = None
+    cost_node_default: float | None = None
     cost_residual_area: float = 0.01
     invalid_cost: float = 1e6
+    false_cover_area_weight: float = 0.2
+    false_cover_ratio_weight: float = 25.0
+    max_false_cover_ratio: float = 0.08
+    hard_invalid_false_cover_ratio: float = 0.25
 
     enable_visible_union: bool = True
     enable_union_with_children: bool = True
@@ -51,7 +62,38 @@ class OperationExplainerConfig:
     thin_aspect_ratio: float = 4.0
     compactness_threshold: float = 0.45
     small_area_ratio: float = 0.35
+    max_insert_group_area_ratio: float = 0.35
+    require_insert_touch_or_contained: bool = True
+    min_divider_neighbor_count: int = 2
+    max_support_label_diversity_without_penalty: int = 2
+    support_label_diversity_penalty: float = 2.0
     min_area_eps: float = 1e-8
+
+    token_template_overlay_insert: int = 2
+    token_template_divide_by_region: int = 2
+    token_template_parallel_supports: int = 1
+    token_template_residual: int = 1
+    token_node: int = 1
+    token_group_node: int = 1
+    token_relation: int = 1
+    token_polygon_start: int = 1
+    token_polygon_end: int = 1
+    token_polygon_vertex: int = 2
+    token_polygon_hole: int = 1
+    token_polygon_component: int = 1
+    token_atom_start: int = 1
+    token_atom_vertex: int = 2
+    token_latent_visible_union: int = 0
+    token_latent_union_with_children: int = 1
+    token_latent_union_with_divider: int = 1
+    token_latent_convex_hull_fill: int = 3
+    token_latent_buffer_close_fill: int = 4
+    token_exception: int = 8
+    token_missing_geometry_fallback: int = 4
+    false_cover_ratio_invalid: float = 0.08
+    false_cover_area_eps: float = 1e-8
+    independent_include_face_polygon: bool = True
+    independent_include_convex_atoms: bool = True
 
 
 @dataclass

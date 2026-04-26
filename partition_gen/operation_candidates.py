@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, List, Sequence, Tuple
 
+from shapely.geometry import Point
+
 from partition_gen.latent_geometry import build_latent_geometry_candidates
 from partition_gen.operation_geometry import (
     atom_to_local,
@@ -32,6 +34,21 @@ def _adjacency_by_pair(evidence_payload: Dict[str, object]) -> Dict[Tuple[int, i
             continue
         output[tuple(sorted(faces))] = adjacency
     return output
+
+
+def _adjacency_by_face(evidence_payload: Dict[str, object]) -> Dict[int, List[Dict[str, object]]]:
+    output: Dict[int, List[Dict[str, object]]] = {}
+    for adjacency in evidence_payload.get("adjacency", []):
+        faces = [int(value) for value in adjacency.get("faces", [])]
+        if len(faces) != 2:
+            continue
+        output.setdefault(faces[0], []).append(adjacency)
+        output.setdefault(faces[1], []).append(adjacency)
+    return output
+
+
+def _are_adjacent(left_id: int, right_id: int, adjacency_by_pair: Dict[Tuple[int, int], Dict[str, object]]) -> bool:
+    return tuple(sorted((int(left_id), int(right_id)))) in adjacency_by_pair
 
 
 def _face_arc_ids(face: Dict[str, object]) -> List[int]:
@@ -177,6 +194,7 @@ def _candidate_label(faces: Sequence[Dict[str, object]]) -> int:
 def _overlay_candidates(
     patch: OperationPatch,
     faces_by_id: Dict[int, Dict[str, object]],
+    adjacency_by_pair: Dict[Tuple[int, int], Dict[str, object]],
     config: OperationExplainerConfig,
     start_index: int,
 ) -> List[OperationCandidate]:
@@ -191,14 +209,33 @@ def _overlay_candidates(
             continue
         features = face.get("features", {})
         area = float(features.get("area", 0.0))
-        if area <= max(support_area * config.small_area_ratio, config.min_area_eps) and not features.get("is_thin", False):
+        if (
+            area <= max(support_area * config.small_area_ratio, config.min_area_eps)
+            and not features.get("is_thin", False)
+            and _are_adjacent(int(support["id"]), int(face["id"]), adjacency_by_pair)
+        ):
             inserts.append(face)
     if not inserts:
+        return []
+    insert_area = sum(float(face.get("features", {}).get("area", 0.0)) for face in inserts)
+    if support_area <= config.min_area_eps or insert_area / support_area > config.max_insert_group_area_ratio:
         return []
 
     candidates: List[OperationCandidate] = []
     latent_candidates = build_latent_geometry_candidates([support], inserts, OVERLAY_INSERT, config)
     for local_index, latent in enumerate(latent_candidates[: config.max_candidates_per_patch]):
+        if config.require_insert_touch_or_contained:
+            latent_geometry = latent.get("geometry")
+            invalid_insert_ids = []
+            if latent_geometry is not None and not latent_geometry.is_empty:
+                for insert in inserts:
+                    centroid = polygon_from_face(insert).centroid
+                    touches = _are_adjacent(int(support["id"]), int(insert["id"]), adjacency_by_pair)
+                    contained = bool(latent_geometry.covers(Point(centroid.x, centroid.y)))
+                    if not (touches or contained):
+                        invalid_insert_ids.append(int(insert["id"]))
+            if invalid_insert_ids:
+                continue
         candidate_id = f"cand_{start_index + len(candidates)}"
         support_node_id = f"{candidate_id}_support"
         group_node_id = f"{candidate_id}_insert_group"
@@ -248,6 +285,7 @@ def _overlay_candidates(
 def _divider_candidates(
     patch: OperationPatch,
     faces_by_id: Dict[int, Dict[str, object]],
+    adjacency_by_face: Dict[int, List[Dict[str, object]]],
     config: OperationExplainerConfig,
     start_index: int,
 ) -> List[OperationCandidate]:
@@ -269,9 +307,32 @@ def _divider_candidates(
                 int(face.get("features", {}).get("degree", 0)),
             ),
         )
+    divider_features = divider.get("features", {})
+    divider_degree = int(divider_features.get("degree", 0))
+    divider_aspect = float(divider_features.get("oriented_aspect_ratio", 0.0))
+    if not (divider_features.get("is_thin", False) or divider_degree >= config.min_divider_neighbor_count or divider_aspect >= config.thin_aspect_ratio):
+        return []
     support_faces = [face for face in faces if int(face["id"]) != int(divider["id"])]
     if len(support_faces) < 2:
         return []
+    adjacent_support_faces = []
+    for face in support_faces:
+        for adjacency in adjacency_by_face.get(int(divider["id"]), []):
+            if int(face["id"]) in [int(value) for value in adjacency.get("faces", [])]:
+                adjacent_support_faces.append(face)
+                break
+    support_faces = adjacent_support_faces
+    if len(support_faces) < config.min_divider_neighbor_count:
+        return []
+    areas = [float(face.get("features", {}).get("area", 0.0)) for face in support_faces]
+    if areas and max(areas) <= config.min_area_eps:
+        return []
+    if areas and sum(1 for area in areas if area >= max(areas) * 0.1) < config.min_divider_neighbor_count:
+        return []
+    label_diversity = len({int(face.get("label", -1)) for face in support_faces})
+    label_diversity_penalty = (
+        float(max(0, label_diversity - config.max_support_label_diversity_without_penalty) * config.support_label_diversity_penalty)
+    )
 
     candidates: List[OperationCandidate] = []
     latent_candidates = build_latent_geometry_candidates(support_faces, [divider], DIVIDE_BY_REGION, config)
@@ -302,7 +363,13 @@ def _divider_candidates(
                 covered,
                 nodes,
                 relations,
-                metadata={"latent_geometry": latent, "divider_face_ids": [int(divider["id"])], "support_face_ids": [int(face["id"]) for face in support_faces]},
+                metadata={
+                    "latent_geometry": latent,
+                    "divider_face_ids": [int(divider["id"])],
+                    "support_face_ids": [int(face["id"]) for face in support_faces],
+                    "support_label_diversity": int(label_diversity),
+                    "support_label_diversity_penalty": float(label_diversity_penalty),
+                },
                 valid=bool(latent["valid"]),
                 failure_reason=latent["failure_reason"],
             )
@@ -380,7 +447,30 @@ def residual_candidate_for_face(face: Dict[str, object], config: OperationExplai
     return _candidate(candidate_id, RESIDUAL, patch, [int(face["id"])], [node], [], [residual], metadata={"face_id": int(face["id"])})
 
 
-def propose_operation_candidates(
+def _dedupe_key(candidate: OperationCandidate):
+    metadata = candidate.metadata or {}
+    latent = metadata.get("latent_geometry")
+    latent_policy = latent.get("policy") if isinstance(latent, dict) else ""
+    if candidate.operation_type == OVERLAY_INSERT:
+        return (
+            candidate.operation_type,
+            tuple(metadata.get("support_face_ids", candidate.covered_face_ids)),
+            tuple(metadata.get("insert_face_ids", ())),
+            latent_policy,
+        )
+    if candidate.operation_type == DIVIDE_BY_REGION:
+        return (
+            candidate.operation_type,
+            tuple(metadata.get("divider_face_ids", ())),
+            tuple(metadata.get("support_face_ids", candidate.covered_face_ids)),
+            latent_policy,
+        )
+    if candidate.operation_type == PARALLEL_SUPPORTS:
+        return (candidate.operation_type, tuple(metadata.get("support_face_ids", candidate.covered_face_ids)))
+    return (candidate.operation_type, candidate.id)
+
+
+def propose_operation_candidates_with_diagnostics(
     evidence_payload: Dict[str, object],
     patches: Sequence[OperationPatch],
     role_prior_payload: Dict[str, object] | None,
@@ -390,12 +480,13 @@ def propose_operation_candidates(
     del role_prior_payload, pairwise_prior_payload
     faces_by_id = _faces_by_id(evidence_payload)
     adjacency_by_pair = _adjacency_by_pair(evidence_payload)
+    adjacency_by_face = _adjacency_by_face(evidence_payload)
     candidates: List[OperationCandidate] = []
     for patch in patches:
         start = len(candidates)
         patch_candidates: List[OperationCandidate] = []
-        patch_candidates.extend(_overlay_candidates(patch, faces_by_id, config, start + len(patch_candidates)))
-        patch_candidates.extend(_divider_candidates(patch, faces_by_id, config, start + len(patch_candidates)))
+        patch_candidates.extend(_overlay_candidates(patch, faces_by_id, adjacency_by_pair, config, start + len(patch_candidates)))
+        patch_candidates.extend(_divider_candidates(patch, faces_by_id, adjacency_by_face, config, start + len(patch_candidates)))
         patch_candidates.extend(_parallel_candidates(patch, faces_by_id, adjacency_by_pair, config, start + len(patch_candidates)))
         candidates.extend(patch_candidates[: config.max_candidates_per_patch])
 
@@ -406,9 +497,31 @@ def propose_operation_candidates(
     unique: List[OperationCandidate] = []
     seen = set()
     for candidate in candidates:
-        key = (candidate.operation_type, candidate.covered_face_ids, str(candidate.metadata.get("latent_geometry", {}).get("policy") if candidate.metadata else ""))
+        key = _dedupe_key(candidate)
         if key in seen and candidate.operation_type != RESIDUAL:
             continue
         seen.add(key)
         unique.append(candidate)
-    return unique
+    diagnostics = {
+        "raw_candidate_count": int(len(candidates)),
+        "deduplicated_candidate_count": int(len(unique)),
+        "dropped_duplicate_count": int(len(candidates) - len(unique)),
+    }
+    return unique, diagnostics
+
+
+def propose_operation_candidates(
+    evidence_payload: Dict[str, object],
+    patches: Sequence[OperationPatch],
+    role_prior_payload: Dict[str, object] | None,
+    pairwise_prior_payload: Dict[str, object] | None,
+    config: OperationExplainerConfig,
+) -> List[OperationCandidate]:
+    candidates, _ = propose_operation_candidates_with_diagnostics(
+        evidence_payload,
+        patches,
+        role_prior_payload,
+        pairwise_prior_payload,
+        config,
+    )
+    return candidates

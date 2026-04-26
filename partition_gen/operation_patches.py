@@ -59,6 +59,80 @@ def _role_prior_best(role_prior_payload: Dict[str, object] | None, face_id: int)
     return str(best.get("role"))
 
 
+def _shared_length_with_seed(seed_face_id: int, face_id: int, adjacency_by_face: Dict[int, List[Dict[str, object]]]) -> float:
+    if seed_face_id == face_id:
+        return float("inf")
+    best = 0.0
+    for adjacency in adjacency_by_face.get(seed_face_id, []):
+        faces = {int(value) for value in adjacency.get("faces", [])}
+        if face_id in faces and seed_face_id in faces:
+            best = max(best, float(adjacency.get("shared_length", 0.0)))
+    return float(best)
+
+
+def _role_relevance(patch_type: str, face_id: int, role_prior_payload: Dict[str, object] | None) -> float:
+    if patch_type == "divider_centered":
+        cost = _role_prior_cost(role_prior_payload, face_id, "divider_region")
+    elif patch_type == "support_centered":
+        cost = _role_prior_cost(role_prior_payload, face_id, "insert_object")
+    else:
+        cost = None
+    if cost is None:
+        return 0.0
+    return float(1.0 / (1.0 + max(0.0, cost)))
+
+
+def trim_patch_faces_preserve_seed(
+    face_ids: Sequence[int],
+    *,
+    seed_face_id: int | None,
+    patch_type: str,
+    faces_by_id: Dict[int, Dict[str, object]],
+    adjacency_by_face: Dict[int, List[Dict[str, object]]],
+    role_prior_payload: Dict[str, object] | None,
+    max_patch_size: int,
+) -> Tuple[Tuple[int, ...], Dict[str, object]]:
+    original = list(dict.fromkeys(int(face_id) for face_id in face_ids if int(face_id) in faces_by_id))
+    if seed_face_id is not None and seed_face_id in faces_by_id and seed_face_id not in original:
+        original.insert(0, int(seed_face_id))
+    if max_patch_size <= 0:
+        return tuple(), {
+            "trimmed": bool(original),
+            "original_face_count": int(len(original)),
+            "final_face_count": 0,
+            "dropped_face_ids": original,
+        }
+    if seed_face_id is None:
+        ordered = sorted(
+            set(original),
+            key=lambda face_id: (
+                -float(faces_by_id[face_id].get("features", {}).get("area", 0.0)),
+                face_id,
+            ),
+        )
+    else:
+        seed_area = float(faces_by_id[int(seed_face_id)].get("features", {}).get("area", 0.0)) if int(seed_face_id) in faces_by_id else 0.0
+        ordered = sorted(
+            set(original),
+            key=lambda face_id: (
+                0 if face_id == int(seed_face_id) else 1,
+                0 if _shared_length_with_seed(int(seed_face_id), face_id, adjacency_by_face) > 0 else 1,
+                -_shared_length_with_seed(int(seed_face_id), face_id, adjacency_by_face),
+                -_role_relevance(patch_type, face_id, role_prior_payload),
+                abs(float(faces_by_id[face_id].get("features", {}).get("area", 0.0)) - seed_area),
+                face_id,
+            ),
+        )
+    limited = tuple(ordered[:max_patch_size])
+    dropped = [face_id for face_id in ordered if face_id not in set(limited)]
+    return limited, {
+        "trimmed": bool(len(limited) < len(set(original))),
+        "original_face_count": int(len(set(original))),
+        "final_face_count": int(len(limited)),
+        "dropped_face_ids": dropped,
+    }
+
+
 def _is_divider_like(face: Dict[str, object], role_prior_payload: Dict[str, object] | None, config: OperationExplainerConfig) -> bool:
     face_id = int(face["id"])
     if _role_prior_best(role_prior_payload, face_id) == "divider_region":
@@ -124,7 +198,15 @@ def build_operation_patches(
     seen: Set[Tuple[str, Tuple[int, ...]]] = set()
 
     def add_patch(patch_type: str, seed_face_id: int | None, face_ids: Sequence[int], metadata: Dict[str, object] | None = None) -> None:
-        limited_face_ids = tuple(sorted(set(int(face_id) for face_id in face_ids)))[: config.max_patch_size]
+        limited_face_ids, trim_metadata = trim_patch_faces_preserve_seed(
+            face_ids,
+            seed_face_id=seed_face_id,
+            patch_type=patch_type,
+            faces_by_id=faces_by_id,
+            adjacency_by_face=adjacency,
+            role_prior_payload=role_prior_payload,
+            max_patch_size=config.max_patch_size,
+        )
         if not limited_face_ids:
             return
         key = (patch_type, limited_face_ids)
@@ -132,7 +214,9 @@ def build_operation_patches(
             return
         seen.add(key)
         patch_id = f"{patch_type}_{len(patches)}"
-        patches.append(_make_patch(patch_id, patch_type, seed_face_id, limited_face_ids, adjacency, metadata))
+        patch_metadata = dict(metadata or {})
+        patch_metadata.update(trim_metadata)
+        patches.append(_make_patch(patch_id, patch_type, seed_face_id, limited_face_ids, adjacency, patch_metadata))
 
     for face in faces_by_id.values():
         face_id = int(face["id"])
