@@ -759,11 +759,11 @@ def build_manual_rule_explanation_payload(
                 return infos
         return ensure_support_node_infos_for_label(label, fallback_face_ids)
 
-    def best_support_info_for_face(face_id: int, support_infos: Sequence[Dict[str, object]]) -> Dict[str, object] | None:
-        if not support_infos:
+    def best_endpoint_info_for_face(face_id: int, endpoint_infos: Sequence[Dict[str, object]]) -> Dict[str, object] | None:
+        if not endpoint_infos:
             return None
         scored = []
-        for info in support_infos:
+        for info in endpoint_infos:
             shared_length = _shared_length_between_face_sets([face_id], _node_info_face_ids(info), adjacency)
             scored.append((shared_length, -min(_node_info_face_ids(info) or {0}), info))
         return max(scored, key=lambda item: item[:2])[2]
@@ -791,7 +791,7 @@ def build_manual_rule_explanation_payload(
         assigned_face_ids_by_support_id: Dict[str, List[int]] = {}
         support_info_by_id = {str(info["id"]): info for info in support_infos}
         for face_id in insert_face_ids:
-            support_info = best_support_info_for_face(face_id, support_infos)
+            support_info = best_endpoint_info_for_face(face_id, support_infos)
             if not support_info:
                 continue
             assigned_face_ids_by_support_id.setdefault(str(support_info["id"]), []).append(face_id)

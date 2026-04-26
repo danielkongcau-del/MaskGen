@@ -325,6 +325,37 @@ class ManualRuleExplainerTests(unittest.TestCase):
         renderable_nodes = [node for node in graph["nodes"] if node.get("renderable", True)]
         self.assertTrue(all(not node.get("is_reference_only", False) for node in renderable_nodes))
 
+    def test_reference_only_context_remains_fallback_when_container_has_no_reusable_endpoint(self) -> None:
+        plain = _face(0, 0, [[0, 0], [20, 0], [20, 20], [0, 20]], degree=2)
+        road = _face(1, 2, [[8, 0], [10, 0], [10, 20], [8, 20]], is_thin=True, degree=2)
+        building = _face(2, 1, [[10, 4], [12, 4], [12, 6], [10, 6]], degree=1)
+        payload = build_manual_rule_explanation_payload(
+            _evidence([plain, road, building], [_adj(0, 1, 0, 2, 20.0), _adj(1, 2, 2, 1, 2.0)]),
+            _role_spec(
+                [
+                    {"subject_label": 2, "object_label": 0, "relation": "DIVIDES", "hard": True},
+                    {"subject_label": 1, "object_label": 2, "relation": "INSERTED_IN", "hard": True},
+                ]
+            ),
+        )
+        graph = payload["generator_target"]["parse_graph"]
+        reference_nodes = [node for node in graph["nodes"] if node.get("is_reference_only")]
+        self.assertTrue(reference_nodes)
+        self.assertEqual(reference_nodes[0]["evidence"]["owned_face_ids"], [])
+        self.assertEqual(reference_nodes[0]["evidence"]["referenced_face_ids"], [1])
+        self.assertEqual(payload["diagnostics"]["duplicate_owned_face_count"], 0)
+        self.assertTrue(payload["validation"]["all_faces_owned_exactly_once"])
+
+        target = sanitize_generator_target(payload["generator_target"])
+        sanitized_reference_nodes = [node for node in target["parse_graph"]["nodes"] if node.get("is_reference_only")]
+        self.assertTrue(sanitized_reference_nodes)
+        for node in sanitized_reference_nodes:
+            self.assertFalse(node["renderable"])
+            self.assertEqual(node["geometry_model"], "none")
+            self.assertNotIn("frame", node)
+            self.assertNotIn("geometry", node)
+            self.assertNotIn("atoms", node)
+
     def test_single_label_image_defaults_to_support(self) -> None:
         woodland = _face(0, 5, [[0, 0], [20, 0], [20, 20], [0, 20]])
         payload = build_manual_rule_explanation_payload(_evidence([woodland]), _role_spec([]))
