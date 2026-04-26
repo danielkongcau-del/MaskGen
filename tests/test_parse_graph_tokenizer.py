@@ -144,6 +144,44 @@ class ParseGraphTokenizerTest(unittest.TestCase):
         self.assertIn("REL_INSERTED_IN", tokens)
         self.assertNotIn(vocab["<UNK>"], ids)
 
+    def test_reference_only_manual_node_does_not_encode_geometry_when_sanitized(self) -> None:
+        target = {
+            "format": "maskgen_generator_target_v1",
+            "target_type": "parse_graph",
+            "size": [256, 256],
+            "parse_graph": {
+                "nodes": [
+                    {
+                        "id": "support_ref_0",
+                        "role": "support_region",
+                        "label": 5,
+                        "is_reference_only": True,
+                        "renderable": False,
+                        "geometry_model": "none",
+                    },
+                    {
+                        "id": "insert_group_0",
+                        "role": "insert_object_group",
+                        "label": 1,
+                        "geometry_model": "none",
+                        "support_id": "support_ref_0",
+                        "children": [],
+                        "count": 0,
+                    },
+                ],
+                "relations": [
+                    {"id": "relation_0", "type": "inserted_in", "object": "insert_group_0", "support": "support_ref_0"},
+                ],
+                "residuals": [],
+            },
+            "metadata": {},
+        }
+        config = ParseGraphTokenizerConfig(coord_bins=32, area_bins=64, max_int=256)
+        tokens = encode_generator_target(target, config=config)
+        self.assertIn("REF_ONLY", tokens)
+        self.assertIn("GEOM_NONE", tokens)
+        self.assertNotIn("POLY", tokens)
+
 
 if __name__ == "__main__":
     unittest.main()

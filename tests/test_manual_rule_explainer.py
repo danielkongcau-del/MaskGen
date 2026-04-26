@@ -5,6 +5,7 @@ import unittest
 
 from shapely.geometry import Polygon
 
+from scripts.build_generator_targets_manual_rule import sanitize_generator_target
 from partition_gen.manual_rule_explainer import ManualRuleExplainerConfig, build_manual_rule_explanation_payload
 
 
@@ -279,6 +280,39 @@ class ManualRuleExplainerTests(unittest.TestCase):
         self.assertEqual(payload["diagnostics"]["residual_face_count"], 0)
         self.assertEqual(payload["diagnostics"]["duplicate_owned_face_count"], 0)
         self.assertTrue(payload["validation"]["all_faces_owned_exactly_once"])
+
+    def test_sanitized_reference_only_node_is_non_renderable_context(self) -> None:
+        field = _face(0, 6, [[0, 0], [20, 0], [20, 20], [0, 20]], degree=1)
+        woodland = _face(1, 5, [[2, 2], [12, 2], [12, 12], [2, 12]], degree=2)
+        building = _face(2, 1, [[4, 4], [6, 4], [6, 6], [4, 6]], degree=1)
+        payload = build_manual_rule_explanation_payload(
+            _evidence([field, woodland, building], [_adj(0, 1, 6, 5, 20.0), _adj(1, 2, 5, 1, 8.0)]),
+            _role_spec(
+                [
+                    {"subject_label": 5, "object_label": 6, "relation": "INSERTED_IN", "hard": True},
+                    {"subject_label": 1, "object_label": 5, "relation": "INSERTED_IN", "hard": True},
+                ]
+            ),
+        )
+        target = sanitize_generator_target(payload["generator_target"])
+        graph = target["parse_graph"]
+        reference_nodes = [node for node in graph["nodes"] if node.get("is_reference_only")]
+        self.assertTrue(reference_nodes)
+        for node in reference_nodes:
+            self.assertFalse(node["renderable"])
+            self.assertEqual(node["geometry_model"], "none")
+            self.assertNotIn("frame", node)
+            self.assertNotIn("geometry", node)
+            self.assertNotIn("atoms", node)
+        node_ids = {node["id"] for node in graph["nodes"]}
+        for relation in graph["relations"]:
+            for key in ("object", "support", "parent", "child", "divider"):
+                if key in relation:
+                    self.assertIn(relation[key], node_ids)
+            for node_id in relation.get("faces", []):
+                self.assertIn(node_id, node_ids)
+        renderable_nodes = [node for node in graph["nodes"] if node.get("renderable", True)]
+        self.assertTrue(all(not node.get("is_reference_only", False) for node in renderable_nodes))
 
     def test_single_label_image_defaults_to_support(self) -> None:
         woodland = _face(0, 5, [[0, 0], [20, 0], [20, 20], [0, 20]])

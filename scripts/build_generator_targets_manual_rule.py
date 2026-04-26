@@ -62,6 +62,14 @@ def iter_evidence_paths(root: Path, split: str | None = None) -> Iterable[Path]:
 
 def _strip_node_for_training(node: dict) -> dict:
     cleaned = copy.deepcopy(node)
+    if bool(cleaned.get("is_reference_only", False)):
+        cleaned["renderable"] = False
+        cleaned["geometry_model"] = "none"
+        cleaned.pop("frame", None)
+        cleaned.pop("geometry", None)
+        cleaned.pop("atoms", None)
+    else:
+        cleaned.setdefault("renderable", True)
     cleaned.pop("evidence", None)
     cleaned.pop("source_face_id", None)
     cleaned.pop("source_atom_id", None)
@@ -90,6 +98,9 @@ def sanitize_generator_target(target: dict) -> dict:
         "node.source_face_id",
         "node.source_atom_id",
         "node.features",
+        "reference_only_node.frame",
+        "reference_only_node.geometry",
+        "reference_only_node.atoms",
         "relation.face_ids",
         "relation.source_face_ids",
         "relation.induced_face_ids",

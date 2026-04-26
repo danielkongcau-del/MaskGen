@@ -325,6 +325,33 @@ skeleton_width_graph
 }
 ```
 
+### 6.5 `renderable` 与 `is_reference_only`
+
+`parse_graph.nodes` 中允许出现只用于关系上下文的引用节点。
+
+这类节点必须满足：
+
+```json
+{
+  "id": "support_ref_0",
+  "role": "support_region",
+  "label": 5,
+  "geometry_model": "none",
+  "is_reference_only": true,
+  "renderable": false
+}
+```
+
+语义：
+
+- `is_reference_only=true` 表示该节点不拥有任何 face，只是作为高层关系的上下文端点。
+- `renderable=false` 表示生成器和 renderer 不应把该节点当作几何目标生成或渲染。
+- 这类节点可以继续被 `inserted_in`、`divides`、`adjacent_to` 等关系引用。
+- 训练目标中的 reference-only 节点不应包含 `frame`、`geometry` 或 `atoms`。
+- renderer / training target 构建时应只把 `renderable != false` 的节点作为几何生成目标。
+
+这样可以避免同一 evidence face 被真实 owning node 和 reference-only context node 重复生成。
+
 ---
 
 ## 7. 核心对象角色
