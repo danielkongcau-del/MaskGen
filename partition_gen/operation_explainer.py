@@ -267,6 +267,18 @@ def build_operation_explanation_payload(
     )
 
     valid_candidates = [candidate for candidate in candidates if candidate.valid]
+    hard_false_cover_candidate_count = sum(
+        1
+        for candidate in candidates
+        if bool((candidate.cost_breakdown or {}).get("false_cover", {}).get("hard_invalid", False))
+    )
+    failure_reason_histogram: Dict[str, int] = {}
+    for candidate in candidates:
+        reason = candidate.failure_reason
+        if not candidate.valid and not reason:
+            reason = "unknown_invalid"
+        if reason:
+            failure_reason_histogram[str(reason)] = int(failure_reason_histogram.get(str(reason), 0)) + 1
     top_candidates = sorted(valid_candidates, key=lambda item: (-float(item.compression_gain), item.operation_type, item.id))[:50]
     candidate_summary = {
         "candidate_count": int(len(candidates)),
@@ -275,6 +287,8 @@ def build_operation_explanation_payload(
         "dropped_duplicate_count": int(candidate_generation_diagnostics["dropped_duplicate_count"]),
         "valid_candidate_count": int(len(valid_candidates)),
         "invalid_candidate_count": int(len(candidates) - len(valid_candidates)),
+        "hard_false_cover_candidate_count": int(hard_false_cover_candidate_count),
+        "failure_reason_histogram": dict(sorted(failure_reason_histogram.items())),
         "selected_candidate_ids": list(selection.selected_candidate_ids),
         "top_candidates": [_candidate_public(candidate) for candidate in top_candidates],
     }
@@ -319,12 +333,14 @@ def build_operation_explanation_payload(
         "total_compression_gain": float(total_gain),
         "false_cover_area_total": float(false_cover_area_total),
         "false_cover_ratio_max": float(false_cover_ratio_max),
+        "hard_false_cover_candidate_count": int(hard_false_cover_candidate_count),
         "selection_method": selection.selection_method,
         "solver_status": selection.solver_status,
         "global_optimal": bool(selection.global_optimal),
         "operation_histogram": operation_histogram,
         "role_histogram": role_histogram,
-        "failure_reasons": sorted({str(candidate.failure_reason) for candidate in candidates if candidate.failure_reason}),
+        "failure_reasons": sorted(failure_reason_histogram.keys()),
+        "failure_reason_histogram": dict(sorted(failure_reason_histogram.items())),
         "weak_profile": weak_payload.get("explainer_profile"),
         "role_prior_profile": role_prior_payload.get("explainer_profile", "initial_face_role_prior"),
         "pairwise_prior_format": pairwise_prior_payload.get("format"),

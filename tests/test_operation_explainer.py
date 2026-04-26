@@ -8,7 +8,8 @@ from pathlib import Path
 from shapely.geometry import Polygon
 
 from partition_gen.operation_candidates import propose_operation_candidates_with_diagnostics
-from partition_gen.operation_code_length import convex_atoms_code_length, polygon_code_length_from_payload
+from partition_gen.operation_code_length import convex_atoms_code_length, node_code_length, polygon_code_length_from_payload, relation_code_length
+from partition_gen.operation_costs import score_operation_candidate
 from partition_gen.operation_explainer import build_operation_explanation_payload
 from partition_gen.operation_patches import build_operation_patches
 from partition_gen.operation_selector import select_operations_with_ortools
@@ -312,6 +313,23 @@ class OperationExplainerTests(unittest.TestCase):
         self.assertEqual(metadata["render_validation"]["status"], "not_implemented")
         self.assertEqual(payload["validation"]["proxy_validation"]["status"], "proxy_only")
 
+    def test_token_length_node_includes_label_and_geometry_model(self) -> None:
+        config = OperationExplainerConfig()
+        length = node_code_length(
+            {"role": "support_region", "label": 3, "geometry_model": "polygon_code"},
+            config,
+        )
+        self.assertEqual(length["breakdown"]["role"], config.token_node)
+        self.assertEqual(length["breakdown"]["label"], config.token_label)
+        self.assertEqual(length["breakdown"]["geometry_model"], config.token_geometry_model)
+        self.assertEqual(length["total"], config.token_node + config.token_label + config.token_geometry_model)
+
+    def test_token_length_relation_counts_endpoints(self) -> None:
+        config = OperationExplainerConfig()
+        length = relation_code_length({"type": "inserted_in", "object": "insert_0", "support": "support_0"}, config)
+        self.assertEqual(length["endpoint_count"], 2)
+        self.assertEqual(length["total"], config.token_relation_type + 2 * config.token_relation_endpoint)
+
     def test_token_length_polygon_code(self) -> None:
         length = polygon_code_length_from_payload(
             {"outer_local": [[0, 0], [1, 0], [1, 1], [0, 1]], "holes_local": []},
@@ -357,6 +375,41 @@ class OperationExplainerTests(unittest.TestCase):
             ),
         )
         self.assertIn("false_cover", payload["diagnostics"]["failure_reasons"])
+        self.assertGreater(payload["candidate_summary"]["hard_false_cover_candidate_count"], 0)
+        self.assertGreater(payload["candidate_summary"]["failure_reason_histogram"].get("false_cover", 0), 0)
+
+    def test_false_cover_hard_invalid_adds_single_exception_token(self) -> None:
+        allowed = _face(0, 0, [[0, 0], [2, 0], [2, 2], [0, 2]])
+        external = _face(1, 1, [[8, 8], [10, 8], [10, 10], [8, 10]])
+        evidence = _evidence([allowed, external])
+        config = OperationExplainerConfig(cost_profile="token_length_v1", false_cover_ratio_invalid=0.01)
+        candidate = OperationCandidate(
+            "c",
+            OVERLAY_INSERT,
+            "p",
+            (0,),
+            (),
+            [{"id": "support", "role": "support_region", "label": 0, "geometry_model": "none"}],
+            [],
+            [],
+            0.0,
+            0.0,
+            0.0,
+            {},
+            True,
+            metadata={
+                "latent_geometry": {
+                    "policy": "convex_hull_fill",
+                    "geometry": Polygon([[0, 0], [12, 0], [12, 12], [0, 12]]),
+                    "valid": True,
+                    "extra_cost": 0.0,
+                }
+            },
+        )
+        scored = score_operation_candidate(candidate, evidence, config)
+        self.assertFalse(scored.valid)
+        self.assertEqual(scored.failure_reason, "false_cover")
+        self.assertEqual(scored.cost_breakdown["operation"]["exception"], config.token_exception)
 
     def test_token_profile_selected_output(self) -> None:
         face = _face(0, 1, [[0, 0], [10, 0], [10, 10], [0, 10]])
@@ -364,6 +417,9 @@ class OperationExplainerTests(unittest.TestCase):
         self.assertEqual(payload["diagnostics"]["cost_profile"], "token_length_v1")
         operation = payload["selected_operations"][0]["cost"]["breakdown"]
         self.assertEqual(operation["cost_profile"], "token_length_v1")
+        residual_operation = operation["operation"]
+        self.assertTrue(residual_operation["breakdown"]["residual_matches_independent"])
+        self.assertEqual(residual_operation["geometry"], 0)
 
     def test_heuristic_profile_still_available(self) -> None:
         face = _face(0, 1, [[0, 0], [10, 0], [10, 10], [0, 10]])
@@ -371,6 +427,17 @@ class OperationExplainerTests(unittest.TestCase):
         self.assertEqual(payload["diagnostics"]["cost_profile"], "heuristic_v1")
         operation = payload["selected_operations"][0]["cost"]["breakdown"]
         self.assertEqual(operation["cost_profile"], "heuristic_v1")
+
+    def test_benchmark_independent_baseline_profiles(self) -> None:
+        face = _face(0, 1, [[0, 0], [10, 0], [10, 10], [0, 10]])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            path = root / "evidence.json"
+            path.write_text(__import__("json").dumps(_evidence([face])), encoding="utf-8")
+            rows = run_benchmark(root, config=OperationExplainerConfig(), independent_baseline_profile="all")
+        self.assertEqual(len(rows), 3)
+        self.assertEqual({row["independent_baseline_profile"] for row in rows}, {"both", "atoms_only", "polygon_only"})
+        self.assertTrue(any(row["independent_include_face_polygon"] and row["independent_include_convex_atoms"] for row in rows))
 
 
 if __name__ == "__main__":

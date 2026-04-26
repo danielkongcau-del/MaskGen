@@ -277,9 +277,6 @@ def score_operation_candidate_token_length(
         failure_reason = failure_reason or "false_cover"
     scored_candidate = replace(candidate, valid=valid)
     operation = token_operation_cost(scored_candidate, evidence_payload, config)
-    if bool(false_cover.get("hard_invalid", False)):
-        operation["exception"] = int(operation.get("exception", 0)) + int(config.token_exception)
-        operation["total"] = int(operation.get("total", 0)) + int(config.token_exception)
     compression_gain = int(independent["total"]) - int(operation["total"])
     breakdown = {
         "cost_profile": "token_length_v1",

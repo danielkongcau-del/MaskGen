@@ -95,18 +95,51 @@ def geometry_code_length_for_node(node: Dict[str, object], config: OperationExpl
 
 def node_code_length(node: Dict[str, object], config: OperationExplainerConfig) -> Dict[str, object]:
     role = str(node.get("role", ""))
-    total = config.token_group_node if role == "insert_object_group" else config.token_node
+    role_token = int(config.token_group_node if role == "insert_object_group" else config.token_node)
+    label_token = int(config.token_label if "label" in node and node.get("label") is not None else 0)
+    geometry_model_token = int(config.token_geometry_model if "geometry_model" in node and node.get("geometry_model") is not None else 0)
+    total = role_token + label_token + geometry_model_token
     return {
         "total": int(total),
         "role": role,
-        "breakdown": {"node": int(total)},
+        "label_encoded": bool(label_token),
+        "geometry_model_encoded": bool(geometry_model_token),
+        "breakdown": {
+            "role": int(role_token),
+            "label": int(label_token),
+            "geometry_model": int(geometry_model_token),
+        },
     }
 
 
+def _relation_endpoint_count(relation: Dict[str, object]) -> int:
+    scalar_reference_keys = ("parent", "child", "object", "support", "divider", "owner", "residual", "atom", "face")
+    list_reference_keys = ("faces", "face_ids", "arc_ids")
+    count = 0
+    for key in scalar_reference_keys:
+        if key in relation and relation.get(key) is not None:
+            count += 1
+    for key in list_reference_keys:
+        value = relation.get(key)
+        if isinstance(value, (list, tuple)):
+            count += len(value)
+        elif value is not None:
+            count += 1
+    return int(count)
+
+
 def relation_code_length(relation: Dict[str, object], config: OperationExplainerConfig) -> Dict[str, object]:
+    endpoint_count = _relation_endpoint_count(relation)
+    relation_type = int(config.token_relation_type)
+    endpoints = int(config.token_relation_endpoint * endpoint_count)
     return {
-        "total": int(config.token_relation),
+        "total": int(relation_type + endpoints),
         "type": relation.get("type"),
+        "endpoint_count": int(endpoint_count),
+        "breakdown": {
+            "relation_type": int(relation_type),
+            "endpoints": int(endpoints),
+        },
     }
 
 
@@ -195,13 +228,15 @@ def independent_code_length_for_faces(
         faces[str(face_id)] = length
         total += int(length["total"])
     adjacency_count = _adjacency_inside(evidence_payload, set(int(value) for value in face_ids))
-    adjacency_length = int(config.token_relation * adjacency_count)
+    adjacency_unit_length = int(config.token_relation_type + 2 * config.token_relation_endpoint)
+    adjacency_length = int(adjacency_unit_length * adjacency_count)
     total += adjacency_length
     return {
         "total": int(total),
         "faces": faces,
         "adjacency_relation_count": int(adjacency_count),
         "adjacency_relation_length": int(adjacency_length),
+        "adjacency_relation_unit_length": int(adjacency_unit_length),
     }
 
 
@@ -229,13 +264,18 @@ def operation_code_length(
             "template": int(config.token_template_residual),
             "nodes": 0,
             "node_count": int(len(candidate.nodes)),
-            "geometry": int(independent["total"]),
+            "geometry": 0,
             "relations": 0,
             "relation_count": 0,
             "latent_policy": 0,
-            "residual": max(0, int(independent["total"]) - int(config.token_template_residual)),
+            "residual": 0,
             "exception": 0,
-            "breakdown": {"residual_matches_independent": True, "independent": independent},
+            "breakdown": {
+                "residual_matches_independent": True,
+                "total": int(independent["total"]),
+                "independent": independent,
+                "note": "Residual operation is costed as the independent baseline so it does not create artificial compression gain.",
+            },
         }
 
     template = _template_code_length(candidate.operation_type, config)

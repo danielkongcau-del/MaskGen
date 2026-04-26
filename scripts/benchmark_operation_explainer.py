@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Iterable, List
 
@@ -25,6 +26,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-patch-size", type=int, default=32)
     parser.add_argument("--max-candidates-per-patch", type=int, default=16)
     parser.add_argument("--cost-profile", type=str, default="token_length_v1", choices=["heuristic_v1", "token_length_v1"])
+    parser.add_argument(
+        "--independent-baseline-profile",
+        type=str,
+        default="both",
+        choices=["both", "atoms_only", "polygon_only", "all"],
+        help="Which independent baseline encoding to use. 'all' writes one row per baseline profile.",
+    )
     return parser.parse_args()
 
 
@@ -39,7 +47,32 @@ def iter_evidence_paths(root: Path, split: str | None = None) -> Iterable[Path]:
         yield path
 
 
-def benchmark_one(path: Path, config: OperationExplainerConfig) -> dict | None:
+def _baseline_flags(profile: str) -> tuple[bool, bool]:
+    if profile == "both":
+        return True, True
+    if profile == "atoms_only":
+        return False, True
+    if profile == "polygon_only":
+        return True, False
+    raise ValueError(f"Unsupported independent baseline profile: {profile}")
+
+
+def _baseline_profiles(profile: str) -> List[str]:
+    if profile == "all":
+        return ["both", "atoms_only", "polygon_only"]
+    return [profile]
+
+
+def _config_for_baseline_profile(config: OperationExplainerConfig, profile: str) -> OperationExplainerConfig:
+    include_polygon, include_atoms = _baseline_flags(profile)
+    return replace(
+        config,
+        independent_include_face_polygon=include_polygon,
+        independent_include_convex_atoms=include_atoms,
+    )
+
+
+def benchmark_one(path: Path, config: OperationExplainerConfig, *, independent_baseline_profile: str = "both") -> dict | None:
     payload = load_json(path)
     if payload.get("format") != "maskgen_explanation_evidence_v1":
         return None
@@ -49,16 +82,21 @@ def benchmark_one(path: Path, config: OperationExplainerConfig) -> dict | None:
         runtime_ms = (time.perf_counter() - started) * 1000.0
         diagnostics = explanation["diagnostics"]
         validation = explanation["validation"]
+        candidate_summary = explanation.get("candidate_summary", {})
         return {
             "source": str(path.as_posix()),
             "cost_profile": diagnostics.get("cost_profile"),
+            "independent_baseline_profile": independent_baseline_profile,
+            "independent_include_face_polygon": bool(config.independent_include_face_polygon),
+            "independent_include_convex_atoms": bool(config.independent_include_convex_atoms),
             "face_count": diagnostics.get("face_count"),
             "patch_count": diagnostics.get("patch_count"),
             "candidate_count": diagnostics.get("candidate_count"),
             "raw_candidate_count": diagnostics.get("raw_candidate_count"),
             "deduplicated_candidate_count": diagnostics.get("deduplicated_candidate_count"),
             "dropped_duplicate_count": diagnostics.get("dropped_duplicate_count"),
-            "valid_candidate_count": explanation.get("candidate_summary", {}).get("valid_candidate_count"),
+            "valid_candidate_count": candidate_summary.get("valid_candidate_count"),
+            "invalid_candidate_count": candidate_summary.get("invalid_candidate_count"),
             "selected_operation_count": diagnostics.get("selected_operation_count"),
             "operation_histogram": diagnostics.get("operation_histogram", {}),
             "role_histogram": diagnostics.get("role_histogram", {}),
@@ -73,17 +111,18 @@ def benchmark_one(path: Path, config: OperationExplainerConfig) -> dict | None:
             "validation_is_valid": validation.get("is_valid"),
             "false_cover_area_total": diagnostics.get("false_cover_area_total"),
             "false_cover_ratio_max": diagnostics.get("false_cover_ratio_max"),
-            "hard_false_cover_candidate_count": sum(
-                1
-                for candidate in explanation.get("candidate_summary", {}).get("top_candidates", [])
-                if candidate.get("false_cover", {}).get("hard_invalid")
-            ),
+            "hard_false_cover_candidate_count": candidate_summary.get("hard_false_cover_candidate_count"),
+            "failure_reason_histogram": candidate_summary.get("failure_reason_histogram", {}),
             "failure_reasons": diagnostics.get("failure_reasons", []),
             "runtime_ms": runtime_ms,
         }
     except Exception as exc:
         return {
             "source": str(path.as_posix()),
+            "cost_profile": config.cost_profile,
+            "independent_baseline_profile": independent_baseline_profile,
+            "independent_include_face_polygon": bool(config.independent_include_face_polygon),
+            "independent_include_convex_atoms": bool(config.independent_include_convex_atoms),
             "error": str(exc),
             "validation_is_valid": False,
             "runtime_ms": (time.perf_counter() - started) * 1000.0,
@@ -96,14 +135,22 @@ def run_benchmark(
     split: str | None = None,
     max_samples: int | None = None,
     config: OperationExplainerConfig,
+    independent_baseline_profile: str = "both",
 ) -> List[dict]:
     rows: List[dict] = []
+    sample_count = 0
+    profiles = _baseline_profiles(independent_baseline_profile)
     for path in iter_evidence_paths(evidence_root, split=split):
-        row = benchmark_one(path, config)
-        if row is None:
+        payload = load_json(path)
+        if payload.get("format") != "maskgen_explanation_evidence_v1":
             continue
-        rows.append(row)
-        if max_samples is not None and len(rows) >= max_samples:
+        for profile in profiles:
+            profiled_config = _config_for_baseline_profile(config, profile)
+            row = benchmark_one(path, profiled_config, independent_baseline_profile=profile)
+            if row is not None:
+                rows.append(row)
+        sample_count += 1
+        if max_samples is not None and sample_count >= max_samples:
             break
     return rows
 
@@ -116,7 +163,13 @@ def main() -> None:
         ortools_time_limit_seconds=args.ortools_time_limit_seconds,
         cost_profile=args.cost_profile,
     )
-    rows = run_benchmark(args.evidence_root, split=args.split, max_samples=args.max_samples, config=config)
+    rows = run_benchmark(
+        args.evidence_root,
+        split=args.split,
+        max_samples=args.max_samples,
+        config=config,
+        independent_baseline_profile=args.independent_baseline_profile,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8") as handle:
         for row in rows:

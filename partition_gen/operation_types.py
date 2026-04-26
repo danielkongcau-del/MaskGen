@@ -75,7 +75,11 @@ class OperationExplainerConfig:
     token_template_residual: int = 1
     token_node: int = 1
     token_group_node: int = 1
+    token_label: int = 1
+    token_geometry_model: int = 1
     token_relation: int = 1
+    token_relation_type: int = 1
+    token_relation_endpoint: int = 1
     token_polygon_start: int = 1
     token_polygon_end: int = 1
     token_polygon_vertex: int = 2
