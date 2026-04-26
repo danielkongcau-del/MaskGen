@@ -1,5 +1,9 @@
 import unittest
+import tempfile
+import json
+from pathlib import Path
 
+from partition_gen.manual_split_validator import validate_topology_geometry_split
 from partition_gen.manual_target_split import build_topology_geometry_split_targets
 from partition_gen.parse_graph_compact_tokenizer import (
     compact_tokenizer_diagnostics,
@@ -13,6 +17,8 @@ from partition_gen.parse_graph_tokenizer import (
     encode_generator_target,
     tokens_to_ids,
 )
+from scripts.build_manual_split_dataset import build_split_dataset
+from scripts.tokenize_manual_split_dataset import _tokenize_target
 
 
 def _polygon_node(node_id, role="support_region", label=0, *, renderable=True, reference_only=False):
@@ -122,6 +128,16 @@ class ManualCompactTokenizerTests(unittest.TestCase):
         self.assertIn("geometry", geometry_target)
         self.assertEqual(diagnostics["geometry_target_count"], 1)
 
+    def test_split_validator_accepts_valid_split(self):
+        target = _target([_polygon_node("support_0", label=0)])
+        topology_target, geometry_targets, _diagnostics = build_topology_geometry_split_targets(target)
+
+        validation = validate_topology_geometry_split(topology_target, geometry_targets)
+
+        self.assertTrue(validation["is_valid"])
+        self.assertEqual(validation["missing_geometry_ref_ids"], [])
+        self.assertEqual(validation["invalid_relation_refs"], [])
+
     def test_topology_geometry_split_skips_non_renderable_nodes(self):
         support = _polygon_node("support_0")
         reference = _polygon_node("support_ref_0", renderable=False, reference_only=True)
@@ -159,6 +175,50 @@ class ManualCompactTokenizerTests(unittest.TestCase):
 
         self.assertEqual(tokens[1], "MANUAL_PARSE_GRAPH_V1")
         self.assertIn("POLYS", tokens)
+
+    def test_build_split_dataset_writes_manifest(self):
+        target = _target([_polygon_node("support_0")])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "manual" / "val" / "graphs" / "0.json"
+            source.parent.mkdir(parents=True)
+            source.write_text(json.dumps(target), encoding="utf-8")
+            output_root = root / "split"
+
+            rows = build_split_dataset(
+                [source],
+                output_split_root=output_root / "val",
+                target_root=root / "manual",
+                split="val",
+            )
+
+            self.assertEqual(len(rows), 1)
+            self.assertTrue(Path(rows[0]["topology_path"]).exists())
+            self.assertEqual(rows[0]["geometry_target_count"], 1)
+            self.assertTrue(Path(rows[0]["geometry_paths"][0]).exists())
+            self.assertTrue((output_root / "val" / "manifest.jsonl").exists())
+            self.assertTrue((output_root / "val" / "summary.json").exists())
+
+    def test_split_tokenize_helpers_encode_written_targets(self):
+        target = _target([_polygon_node("support_0")])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "manual" / "val" / "graphs" / "0.json"
+            source.parent.mkdir(parents=True)
+            source.write_text(json.dumps(target), encoding="utf-8")
+            output_root = root / "split"
+            rows = build_split_dataset(
+                [source],
+                output_split_root=output_root / "val",
+                target_root=root / "manual",
+                split="val",
+            )
+
+            topology_tokens = _tokenize_target(Path(rows[0]["topology_path"]), target_kind="topology", config=ParseGraphTokenizerConfig())
+            geometry_tokens = _tokenize_target(Path(rows[0]["geometry_paths"][0]), target_kind="geometry", config=ParseGraphTokenizerConfig())
+
+            self.assertEqual(topology_tokens[1], "MANUAL_TOPOLOGY_V1")
+            self.assertEqual(geometry_tokens[1], "MANUAL_GEOMETRY_V1")
 
 
 if __name__ == "__main__":
