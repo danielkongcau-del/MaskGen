@@ -8,7 +8,13 @@ from pathlib import Path
 from shapely.geometry import Polygon
 
 from partition_gen.operation_candidates import propose_operation_candidates_with_diagnostics
-from partition_gen.operation_code_length import convex_atoms_code_length, node_code_length, polygon_code_length_from_payload, relation_code_length
+from partition_gen.operation_code_length import (
+    convex_atoms_code_length,
+    node_code_length,
+    polygon_code_length_from_payload,
+    relation_code_length,
+    relation_reference_counts,
+)
 from partition_gen.operation_costs import score_operation_candidate
 from partition_gen.operation_explainer import build_operation_explanation_payload
 from partition_gen.operation_patches import build_operation_patches
@@ -328,6 +334,47 @@ class OperationExplainerTests(unittest.TestCase):
         config = OperationExplainerConfig()
         length = relation_code_length({"type": "inserted_in", "object": "insert_0", "support": "support_0"}, config)
         self.assertEqual(length["endpoint_count"], 2)
+        self.assertEqual(length["semantic_endpoint_count"], 2)
+        self.assertEqual(length["evidence_reference_count"], 0)
+        self.assertEqual(length["total"], config.token_relation_type + 2 * config.token_relation_endpoint)
+
+    def test_relation_code_length_does_not_count_evidence_refs_by_default(self) -> None:
+        config = OperationExplainerConfig()
+        relation = {
+            "type": "adjacent_to",
+            "faces": ["support_0", "support_1"],
+            "arc_ids": [1, 2, 3],
+            "face_ids": [10, 11],
+        }
+        length = relation_code_length(relation, config)
+        counts = relation_reference_counts(relation, config)
+        self.assertEqual(counts["semantic_endpoint_count"], 2)
+        self.assertEqual(counts["evidence_reference_count"], 5)
+        self.assertEqual(counts["encoded_evidence_reference_count"], 0)
+        self.assertEqual(length["total"], config.token_relation_type + 2 * config.token_relation_endpoint)
+
+    def test_relation_code_length_can_count_evidence_refs_when_enabled(self) -> None:
+        config = OperationExplainerConfig(token_encode_evidence_refs=True)
+        relation = {
+            "type": "adjacent_to",
+            "faces": ["support_0", "support_1"],
+            "arc_ids": [1, 2, 3],
+            "face_ids": [10, 11],
+        }
+        length = relation_code_length(relation, config)
+        self.assertEqual(length["semantic_endpoint_count"], 2)
+        self.assertEqual(length["evidence_reference_count"], 5)
+        self.assertEqual(length["encoded_evidence_reference_count"], 5)
+        self.assertEqual(
+            length["total"],
+            config.token_relation_type + 2 * config.token_relation_endpoint + 5 * config.token_evidence_reference,
+        )
+
+    def test_relation_contains_counts_parent_child(self) -> None:
+        config = OperationExplainerConfig()
+        length = relation_code_length({"type": "contains", "parent": "insert_group_0", "child": "insert_0"}, config)
+        self.assertEqual(length["semantic_endpoint_count"], 2)
+        self.assertEqual(length["evidence_reference_count"], 0)
         self.assertEqual(length["total"], config.token_relation_type + 2 * config.token_relation_endpoint)
 
     def test_token_length_polygon_code(self) -> None:
@@ -410,6 +457,72 @@ class OperationExplainerTests(unittest.TestCase):
         self.assertFalse(scored.valid)
         self.assertEqual(scored.failure_reason, "false_cover")
         self.assertEqual(scored.cost_breakdown["operation"]["exception"], config.token_exception)
+
+    def test_token_length_overlay_insert_selected_when_compressive(self) -> None:
+        insert_rings = [
+            [[3, 3], [5, 3], [5, 5], [3, 5]],
+            [[8, 8], [10, 8], [10, 10], [8, 10]],
+            [[14, 14], [16, 14], [16, 16], [14, 16]],
+        ]
+        support = _face(0, 0, [[0, 0], [20, 0], [20, 20], [0, 20]], insert_rings, degree=3)
+        inserts = [_face(index + 1, 1, ring, degree=1) for index, ring in enumerate(insert_rings)]
+        evidence = _evidence(
+            [support, *inserts],
+            [_adj(0, index + 1, 0, 1, 8.0) for index in range(len(inserts))],
+        )
+        payload = build_operation_explanation_payload(
+            evidence,
+            config=OperationExplainerConfig(
+                cost_profile="token_length_v1",
+                enable_divide_by_region=False,
+                enable_parallel_supports=False,
+            ),
+        )
+        overlay_candidates = [item for item in payload["candidate_summary"]["top_candidates"] if item["operation_type"] == "OVERLAY_INSERT"]
+        self.assertTrue(overlay_candidates)
+        self.assertTrue(any(float(item["compression_gain"]) > 0 for item in overlay_candidates))
+        selected_types = {item["operation_type"] for item in payload["selected_operations"]}
+        self.assertIn("OVERLAY_INSERT", selected_types)
+        graph = payload["generator_target"]["parse_graph"]
+        roles = {node["role"] for node in graph["nodes"]}
+        relation_types = {relation["type"] for relation in graph["relations"]}
+        self.assertIn("support_region", roles)
+        self.assertIn("insert_object_group", roles)
+        self.assertIn("insert_object", roles)
+        self.assertIn("inserted_in", relation_types)
+        self.assertIn("contains", relation_types)
+
+    def test_token_length_divide_by_region_selected_when_compressive(self) -> None:
+        left = _face(0, 0, [[0, 0], [9, 0], [9, 20], [0, 20]], degree=1)
+        divider = _face(1, 2, [[9, 0], [11, 0], [11, 20], [9, 20]], is_thin=True, degree=2)
+        right = _face(2, 0, [[11, 0], [20, 0], [20, 20], [11, 20]], degree=1)
+        evidence = _evidence([left, divider, right], [_adj(0, 1, 0, 2, 20.0), _adj(1, 2, 2, 0, 20.0)])
+        payload = build_operation_explanation_payload(evidence, config=OperationExplainerConfig(cost_profile="token_length_v1"))
+        divide_candidates = [item for item in payload["candidate_summary"]["top_candidates"] if item["operation_type"] == "DIVIDE_BY_REGION"]
+        self.assertTrue(divide_candidates)
+        self.assertTrue(any(float(item["compression_gain"]) > 0 for item in divide_candidates))
+        selected_types = {item["operation_type"] for item in payload["selected_operations"]}
+        self.assertIn("DIVIDE_BY_REGION", selected_types)
+        graph = payload["generator_target"]["parse_graph"]
+        roles = {node["role"] for node in graph["nodes"]}
+        relation_types = {relation["type"] for relation in graph["relations"]}
+        self.assertIn("support_region", roles)
+        self.assertIn("divider_region", roles)
+        self.assertIn("divides", relation_types)
+
+    def test_token_length_does_not_select_non_compressive_high_level_operation(self) -> None:
+        first = _face(0, 0, [[0, 0], [2, 0], [2, 2], [0, 2]], degree=0)
+        second = _face(1, 1, [[15, 15], [17, 15], [17, 17], [15, 17]], degree=0)
+        payload = build_operation_explanation_payload(
+            _evidence([first, second]),
+            config=OperationExplainerConfig(
+                cost_profile="token_length_v1",
+                enable_parallel_supports=False,
+            ),
+        )
+        selected_types = {item["operation_type"] for item in payload["selected_operations"]}
+        self.assertEqual(selected_types, {"RESIDUAL"})
+        self.assertTrue(all(float(item["cost"]["compression_gain"]) <= 0 for item in payload["selected_operations"]))
 
     def test_token_profile_selected_output(self) -> None:
         face = _face(0, 1, [[0, 0], [10, 0], [10, 10], [0, 10]])

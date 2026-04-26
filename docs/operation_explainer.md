@@ -292,3 +292,42 @@ false_cover_ratio > false_cover_ratio_invalid
 ```
 
 该候选会被标记为 invalid，并增加 exception token。`render_iou` 仍然不会被伪造；当前只输出 proxy validation。
+
+### 10.4 Semantic References vs Evidence References
+
+`token_length_v1` 默认只编码生成器需要学习的语义结构：
+
+- 节点的 `role`
+- 节点的 `label`
+- 节点的 `geometry_model`
+- 节点几何或凸块几何
+- 关系类型
+- 关系的语义端点，例如 `object`、`support`、`divider`、`parent`、`child`、`faces`
+
+默认不编码 evidence/debug 追溯字段：
+
+- `face_ids`
+- `arc_ids`
+- `source_face_ids`
+- `source_arc_ids`
+- `atom_ids`
+- `source_atom_id`
+- `source_face_id`
+
+这些字段用于诊断、可视化和追溯证据来源，不应该默认增加生成器训练目标的描述长度。否则同一个语义关系会因为 evidence 中保存了更多 arc 或 face 引用而被错误地认为更复杂。
+
+如果需要实验“把 evidence 引用也计入编码长度”，可以设置：
+
+```python
+OperationExplainerConfig(token_encode_evidence_refs=True)
+```
+
+此时 evidence 引用会按 `token_evidence_reference` 计入 relation length。默认值仍然是 `False`。
+
+`token_relation` 是旧兼容字段。`token_length_v1` 的 relation length 使用：
+
+```text
+token_relation_type
++ token_relation_endpoint * semantic_endpoint_count
++ token_evidence_reference * encoded_evidence_reference_count
+```

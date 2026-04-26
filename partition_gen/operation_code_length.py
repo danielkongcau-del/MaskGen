@@ -112,33 +112,73 @@ def node_code_length(node: Dict[str, object], config: OperationExplainerConfig) 
     }
 
 
-def _relation_endpoint_count(relation: Dict[str, object]) -> int:
-    scalar_reference_keys = ("parent", "child", "object", "support", "divider", "owner", "residual", "atom", "face")
-    list_reference_keys = ("faces", "face_ids", "arc_ids")
-    count = 0
-    for key in scalar_reference_keys:
-        if key in relation and relation.get(key) is not None:
-            count += 1
-    for key in list_reference_keys:
-        value = relation.get(key)
-        if isinstance(value, (list, tuple)):
-            count += len(value)
-        elif value is not None:
-            count += 1
-    return int(count)
+def _reference_count(value: object) -> int:
+    if isinstance(value, (list, tuple)):
+        return len(value)
+    if value is None:
+        return 0
+    return 1
+
+
+def relation_reference_counts(relation: Dict[str, object], config: OperationExplainerConfig) -> Dict[str, object]:
+    scalar_semantic_keys = ("parent", "child", "object", "support", "divider", "owner", "residual", "atom", "face")
+    list_semantic_keys = ("faces",)
+    scalar_evidence_keys = ("source_face_id", "source_atom_id")
+    list_evidence_keys = ("face_ids", "source_face_ids", "arc_ids", "atom_ids", "source_arc_ids")
+
+    semantic_endpoint_count = 0
+    evidence_reference_count = 0
+    semantic_keys = []
+    evidence_keys = []
+
+    for key in scalar_semantic_keys + list_semantic_keys:
+        count = _reference_count(relation.get(key)) if key in relation else 0
+        if count:
+            semantic_endpoint_count += count
+            semantic_keys.append(key)
+
+    for key in scalar_evidence_keys + list_evidence_keys:
+        count = _reference_count(relation.get(key)) if key in relation else 0
+        if count:
+            evidence_reference_count += count
+            evidence_keys.append(key)
+
+    evidence = relation.get("evidence")
+    if isinstance(evidence, dict):
+        for key in scalar_evidence_keys + list_evidence_keys:
+            count = _reference_count(evidence.get(key)) if key in evidence else 0
+            if count:
+                evidence_reference_count += count
+                evidence_keys.append(f"evidence.{key}")
+
+    encoded_evidence_reference_count = evidence_reference_count if config.token_encode_evidence_refs else 0
+    return {
+        "semantic_endpoint_count": int(semantic_endpoint_count),
+        "evidence_reference_count": int(evidence_reference_count),
+        "encoded_evidence_reference_count": int(encoded_evidence_reference_count),
+        "semantic_keys": semantic_keys,
+        "evidence_keys": evidence_keys,
+    }
 
 
 def relation_code_length(relation: Dict[str, object], config: OperationExplainerConfig) -> Dict[str, object]:
-    endpoint_count = _relation_endpoint_count(relation)
+    counts = relation_reference_counts(relation, config)
     relation_type = int(config.token_relation_type)
-    endpoints = int(config.token_relation_endpoint * endpoint_count)
+    semantic_endpoints = int(config.token_relation_endpoint * int(counts["semantic_endpoint_count"]))
+    evidence_refs = int(config.token_evidence_reference * int(counts["encoded_evidence_reference_count"]))
     return {
-        "total": int(relation_type + endpoints),
+        "total": int(relation_type + semantic_endpoints + evidence_refs),
         "type": relation.get("type"),
-        "endpoint_count": int(endpoint_count),
+        "endpoint_count": int(counts["semantic_endpoint_count"]),
+        "semantic_endpoint_count": int(counts["semantic_endpoint_count"]),
+        "evidence_reference_count": int(counts["evidence_reference_count"]),
+        "encoded_evidence_reference_count": int(counts["encoded_evidence_reference_count"]),
+        "semantic_keys": list(counts["semantic_keys"]),
+        "evidence_keys": list(counts["evidence_keys"]),
         "breakdown": {
             "relation_type": int(relation_type),
-            "endpoints": int(endpoints),
+            "semantic_endpoints": int(semantic_endpoints),
+            "evidence_refs": int(evidence_refs),
         },
     }
 

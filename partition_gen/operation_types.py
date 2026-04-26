@@ -80,6 +80,8 @@ class OperationExplainerConfig:
     token_relation: int = 1
     token_relation_type: int = 1
     token_relation_endpoint: int = 1
+    token_encode_evidence_refs: bool = False
+    token_evidence_reference: int = 1
     token_polygon_start: int = 1
     token_polygon_end: int = 1
     token_polygon_vertex: int = 2

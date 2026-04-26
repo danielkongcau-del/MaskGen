@@ -63,6 +63,7 @@ def summarize(rows: List[dict]) -> str:
     ok_rows = [row for row in rows if "error" not in row]
     cost_profiles = sorted({str(row.get("cost_profile", "unknown")) for row in ok_rows})
     baseline_profiles = sorted({str(row.get("independent_baseline_profile", "unknown")) for row in ok_rows})
+    evidence_ref_profiles = sorted({str(bool(row.get("token_encode_evidence_refs", False))) for row in ok_rows})
     lines = [
         "# Operation Explainer Benchmark Summary",
         "",
@@ -76,6 +77,7 @@ def summarize(rows: List[dict]) -> str:
         f"- mean total_compression_gain: {_mean(ok_rows, 'total_compression_gain'):.3f}",
         f"- mean false_cover_ratio_max: {_mean(ok_rows, 'false_cover_ratio_max'):.6f}",
         f"- mean hard_false_cover_candidate_count: {_mean(ok_rows, 'hard_false_cover_candidate_count'):.3f}",
+        f"- token_encode_evidence_refs values: {', '.join(evidence_ref_profiles) if evidence_ref_profiles else 'n/a'}",
         "",
         "## Operation Histogram",
         "",
@@ -123,20 +125,39 @@ def summarize(rows: List[dict]) -> str:
                 "```",
             ]
         )
+    lines.extend(["", "## Evidence Reference Encoding Groups"])
+    for profile in evidence_ref_profiles:
+        profile_rows = [row for row in ok_rows if str(bool(row.get("token_encode_evidence_refs", False))) == profile]
+        lines.extend(
+            [
+                "",
+                f"### token_encode_evidence_refs={profile}",
+                "",
+                f"- samples: {len(profile_rows)}",
+                f"- valid ratio: {_ratio(profile_rows, 'validation_is_valid'):.3f}",
+                f"- mean residual_area_ratio: {_mean(profile_rows, 'residual_area_ratio'):.6f}",
+                f"- mean total_compression_gain: {_mean(profile_rows, 'total_compression_gain'):.3f}",
+                f"- mean false_cover_ratio_max: {_mean(profile_rows, 'false_cover_ratio_max'):.6f}",
+                f"- mean hard_false_cover_candidate_count: {_mean(profile_rows, 'hard_false_cover_candidate_count'):.3f}",
+                "```json",
+                json.dumps(_histogram(profile_rows, "operation_histogram"), indent=2, ensure_ascii=False),
+                "```",
+            ]
+        )
     lines.extend(
         [
         "",
         "## Top False Cover",
         "",
-        _table(_top(ok_rows, "false_cover_ratio_max"), ["source", "independent_baseline_profile", "false_cover_ratio_max", "false_cover_area_total", "hard_false_cover_candidate_count", "validation_is_valid"]),
+        _table(_top(ok_rows, "false_cover_ratio_max"), ["source", "independent_baseline_profile", "token_encode_evidence_refs", "false_cover_ratio_max", "false_cover_area_total", "hard_false_cover_candidate_count", "validation_is_valid"]),
         "",
         "## Top Residual Area Ratio",
         "",
-        _table(_top(ok_rows, "residual_area_ratio"), ["source", "independent_baseline_profile", "residual_area_ratio", "residual_face_count", "operation_histogram"]),
+        _table(_top(ok_rows, "residual_area_ratio"), ["source", "independent_baseline_profile", "token_encode_evidence_refs", "residual_area_ratio", "residual_face_count", "operation_histogram"]),
         "",
         "## Lowest Compression Gain",
         "",
-        _table(_top(ok_rows, "total_compression_gain", reverse=False), ["source", "independent_baseline_profile", "total_compression_gain", "residual_area_ratio", "operation_histogram"]),
+        _table(_top(ok_rows, "total_compression_gain", reverse=False), ["source", "independent_baseline_profile", "token_encode_evidence_refs", "total_compression_gain", "residual_area_ratio", "operation_histogram"]),
         ]
     )
     return "\n".join(lines) + "\n"

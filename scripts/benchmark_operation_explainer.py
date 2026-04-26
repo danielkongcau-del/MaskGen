@@ -26,6 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-patch-size", type=int, default=32)
     parser.add_argument("--max-candidates-per-patch", type=int, default=16)
     parser.add_argument("--cost-profile", type=str, default="token_length_v1", choices=["heuristic_v1", "token_length_v1"])
+    parser.add_argument("--token-encode-evidence-refs", action="store_true")
     parser.add_argument(
         "--independent-baseline-profile",
         type=str,
@@ -89,6 +90,11 @@ def benchmark_one(path: Path, config: OperationExplainerConfig, *, independent_b
             "independent_baseline_profile": independent_baseline_profile,
             "independent_include_face_polygon": bool(config.independent_include_face_polygon),
             "independent_include_convex_atoms": bool(config.independent_include_convex_atoms),
+            "token_encode_evidence_refs": bool(config.token_encode_evidence_refs),
+            "token_relation_endpoint": int(config.token_relation_endpoint),
+            "token_relation_type": int(config.token_relation_type),
+            "token_label": int(config.token_label),
+            "token_geometry_model": int(config.token_geometry_model),
             "face_count": diagnostics.get("face_count"),
             "patch_count": diagnostics.get("patch_count"),
             "candidate_count": diagnostics.get("candidate_count"),
@@ -123,6 +129,11 @@ def benchmark_one(path: Path, config: OperationExplainerConfig, *, independent_b
             "independent_baseline_profile": independent_baseline_profile,
             "independent_include_face_polygon": bool(config.independent_include_face_polygon),
             "independent_include_convex_atoms": bool(config.independent_include_convex_atoms),
+            "token_encode_evidence_refs": bool(config.token_encode_evidence_refs),
+            "token_relation_endpoint": int(config.token_relation_endpoint),
+            "token_relation_type": int(config.token_relation_type),
+            "token_label": int(config.token_label),
+            "token_geometry_model": int(config.token_geometry_model),
             "error": str(exc),
             "validation_is_valid": False,
             "runtime_ms": (time.perf_counter() - started) * 1000.0,
@@ -162,6 +173,7 @@ def main() -> None:
         max_candidates_per_patch=args.max_candidates_per_patch,
         ortools_time_limit_seconds=args.ortools_time_limit_seconds,
         cost_profile=args.cost_profile,
+        token_encode_evidence_refs=bool(args.token_encode_evidence_refs),
     )
     rows = run_benchmark(
         args.evidence_root,
