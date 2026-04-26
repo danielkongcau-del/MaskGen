@@ -96,6 +96,78 @@ Rebuilds and visualizes benchmark rows that need inspection.
 
 It exports cases with low IoU, fallback backend usage, rejected bridge sets, or no piece-count improvement.
 
+### `scripts/build_explanation_evidence_single.py`
+
+Builds one `maskgen_explanation_evidence_v1` file from a global approximation JSON.
+
+It packages faces, arcs, adjacency, face features, arc features, and per-face convex atoms for the explainer.
+
+### `scripts/build_explanation_single.py`
+
+Builds one initial `maskgen_explanation_v1` and nested generator `parse_graph` target from an evidence JSON or global approximation JSON.
+
+The current explainer uses binary label-pair relation scoring plus image-level label-role consistency before emitting support, divider, insert, and residual nodes.
+
+### `scripts/visualize_explanation.py`
+
+Visualizes one explanation JSON with source mask, evidence arcs, evidence faces, and final role-colored parse graph overlay.
+
+### `scripts/analyze_label_pair_relations_single.py`
+
+Runs the standalone binary label-pair relation analyzer on one evidence JSON.
+
+It constructs two-class subscenes for adjacent label pairs, scores support-insert, support-divider, adjacent-support, and residual candidates, then writes diagnostics for each pair.
+
+### `scripts/visualize_label_pair_relations.py`
+
+Visualizes the standalone label-pair relation analysis, including source mask, preferred role by label, and selected pairwise decisions.
+
+### `scripts/build_weak_explanation_single.py`
+
+Builds one weak `maskgen_explanation_v1` using the `weak_convex_face_atoms_v1` profile.
+
+It packs semantic faces, label groups, convex atom nodes, atom membership relations, and face adjacency without assigning support/divider/insert roles.
+
+### `scripts/visualize_weak_explanation.py`
+
+Visualizes one weak explanation with source mask, shared arcs, semantic faces, and convex atom overlays.
+
+### `scripts/render_weak_explanation.py`
+
+Renders and validates one weak explanation parse graph.
+
+It unions each face's `convex_atom` nodes back into rendered face polygons, writes a rendered partition JSON, optionally writes a mask PNG, and reports per-face atom IoU plus full-image gap/overlap metrics.
+
+### `scripts/benchmark_weak_explainer.py`
+
+Runs a batch benchmark for the weak explainer.
+
+It can start from partition graphs, global approximation JSONs, or evidence JSONs, then builds weak explanations, renders them, and writes one JSONL row per sample with validity, IoU, gap/overlap, atom count, relation count, and runtime metrics.
+
+### `scripts/build_generator_targets.py`
+
+Builds `maskgen_generator_target_v1` parse graph targets in batch.
+
+It runs the current pipeline through global approximation, explanation evidence, weak explanation, and weak render validation, then writes one sanitized generator target JSON per sample plus a manifest. The default convex backend is CGAL, and each manifest row records actual backend usage, render validity, convex failures, residual count, and whether the sample is training-usable.
+
+### `scripts/tokenize_generator_targets.py`
+
+Tokenizes generator target parse graphs into fixed-grammar token sequences for autoregressive training.
+
+It reads `data/remote_256_generator_targets_*<split>/manifest.jsonl`, keeps training-usable rows by default, writes `sequences.jsonl`, writes a fixed vocabulary, and records token length statistics. The tokenizer uses a structured weak-parse-graph grammar rather than raw JSON text.
+
+### `scripts/summarize_weak_explainer_benchmark.py`
+
+Summarizes a weak explainer benchmark JSONL into Markdown or JSON.
+
+It reports success rates, render-valid rates, atom/face statistics, code-length proxy statistics, worst IoU samples, largest gap/overlap samples, and high atom-per-face samples.
+
+### `scripts/export_weak_explainer_failures.py`
+
+Exports weak explainer benchmark rows that need inspection.
+
+It rebuilds selected samples, writes evidence/weak/render/validation JSONs, renders mask PNGs, and generates weak explanation visualizations for invalid renders, low-IoU cases, or gap/overlap cases.
+
 ## Supporting Or Experimental Dataset Scripts
 
 ### `scripts/build_cdt_partition_dataset.py`
@@ -235,6 +307,36 @@ Implements topology-safe smoothing for full-image shared arcs.
 It regularizes staircase-like arcs after global approximation, rebuilds all face rings, and accepts only changes that preserve full-image validity.
 
 The default path searches straightenable full arcs and straightenable subsegments. Optional face-chain smoothing, strip-face smoothing, and polyline smoothing are exposed for more aggressive cleanup experiments.
+
+### `partition_gen/explanation_evidence.py`
+
+Builds the evidence layer consumed by the explainer.
+
+It computes face/arc features, adjacency records, convex atoms, validation, and statistics while keeping global approximation and convex splitting as separate upstream modules.
+
+### `partition_gen/pairwise_relation_explainer.py`
+
+Implements the standalone binary label-pair relation analyzer.
+
+It removes unrelated labels conceptually, tests candidate explanations for each adjacent label pair, uses convex partition code length as geometry evidence, and records why a pair is treated as support-insert, support-divider, adjacent-support, or residual.
+
+### `partition_gen/explainer.py`
+
+Implements the initial explanation builder.
+
+It combines face-local role candidates, binary label-pair relation evidence, and image-level label-role consistency to produce `maskgen_explanation_v1` and the nested `maskgen_generator_target_v1` parse graph.
+
+### `partition_gen/weak_explainer.py`
+
+Implements the weak explanation builder.
+
+It uses evidence faces and existing convex partitions to produce a structural parse graph with `label_group`, `semantic_face`, and `convex_atom` nodes. This path avoids strong semantic role decisions and is intended as the safer first generator target.
+
+### `partition_gen/weak_parse_graph_renderer.py`
+
+Renders and validates the weak parse graph profile.
+
+It converts local convex atom coordinates back to world-space polygons, unions atoms per semantic face, compares the result against evidence face geometry, and can rasterize the rendered faces to a mask for approximate pixel-level inspection.
 
 ### `tools/optimal_convex_partition_cli.cpp`
 

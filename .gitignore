@@ -4,8 +4,6 @@ data/
 # Local training outputs
 results/
 outputs/*
-!outputs/visualizations/
-!outputs/visualizations/**
 runs/
 logs/
 pretrained/

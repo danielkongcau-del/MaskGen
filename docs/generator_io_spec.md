@@ -64,7 +64,9 @@ parse_graph
 - `explainer` 负责把低层证据解释成高层结构。
 - `generator target` 是生成器最终要学习的数据格式。
 
-解释器的职责是从低层 evidence 中提取：
+解释器可以有两个层级。
+
+强解释器的职责是从低层 evidence 中提取：
 
 ```text
 support region
@@ -76,6 +78,17 @@ relation
 ```
 
 生成器学习的应该是这些结构对象及其关系。
+
+弱解释器不强行判断这些高层语义角色，而是导出更稳定的几何组成结构：
+
+```text
+semantic face
+convex atom
+label group
+face adjacency
+```
+
+当前如果强语义解释不稳定，推荐先使用弱解释器 profile：`weak_convex_face_atoms_v1`。
 
 ---
 
@@ -647,60 +660,62 @@ parse_graph
   "format": "maskgen_generator_target_v1",
   "target_type": "parse_graph",
   "size": [256, 256],
-  "nodes": [
-    {
-      "id": "support_0",
-      "role": "support_region",
-      "label": 1,
-      "frame": {
-        "origin": [128.0, 128.0],
-        "scale": 96.0,
-        "orientation": 0.0
+  "parse_graph": {
+    "nodes": [
+      {
+        "id": "support_0",
+        "role": "support_region",
+        "label": 1,
+        "frame": {
+          "origin": [128.0, 128.0],
+          "scale": 96.0,
+          "orientation": 0.0
+        },
+        "geometry_model": "polygon_code",
+        "geometry": {
+          "outer_local": [[-0.5, -0.4], [0.6, -0.3], [0.5, 0.5], [-0.4, 0.6]],
+          "holes_local": []
+        }
       },
-      "geometry_model": "polygon_code",
-      "geometry": {
-        "outer_local": [[-0.5, -0.4], [0.6, -0.3], [0.5, 0.5], [-0.4, 0.6]],
-        "holes_local": []
-      }
-    },
-    {
-      "id": "divider_0",
-      "role": "divider_region",
-      "label": 4,
-      "frame": {
-        "origin": [118.0, 120.0],
-        "scale": 90.0,
-        "orientation": 0.1
+      {
+        "id": "divider_0",
+        "role": "divider_region",
+        "label": 4,
+        "frame": {
+          "origin": [118.0, 120.0],
+          "scale": 90.0,
+          "orientation": 0.1
+        },
+        "geometry_model": "polygon_code",
+        "geometry": {
+          "outer_local": [[-0.5, -0.05], [0.5, -0.04], [0.5, 0.05], [-0.5, 0.04]],
+          "holes_local": []
+        }
       },
-      "geometry_model": "polygon_code",
-      "geometry": {
-        "outer_local": [[-0.5, -0.05], [0.5, -0.04], [0.5, 0.05], [-0.5, 0.04]],
-        "holes_local": []
+      {
+        "id": "insert_group_0",
+        "role": "insert_object_group",
+        "support_id": "support_0",
+        "label": 3,
+        "count": 2,
+        "children": ["insert_0", "insert_1"]
       }
-    },
-    {
-      "id": "insert_group_0",
-      "role": "insert_object_group",
-      "support_id": "support_0",
-      "label": 3,
-      "count": 2,
-      "children": ["insert_0", "insert_1"]
-    }
-  ],
-  "relations": [
-    {
-      "type": "divides",
-      "divider": "divider_0",
-      "support": "support_0",
-      "induced_face_ids": [5, 6, 7, 8]
-    },
-    {
-      "type": "inserted_in",
-      "object": "insert_0",
-      "support": "support_0"
-    }
-  ],
-  "residuals": [],
+    ],
+    "relations": [
+      {
+        "type": "divides",
+        "divider": "divider_0",
+        "support": "support_0",
+        "induced_face_ids": [5, 6, 7, 8]
+      },
+      {
+        "type": "inserted_in",
+        "object": "insert_0",
+        "support": "support_0"
+      }
+    ],
+    "residuals": []
+  },
   "metadata": {
     "source_explanation": "data/remote_256_explanations/val/83.json",
     "code_length": 128.4,
@@ -750,9 +765,11 @@ generator output
   "format": "maskgen_generator_sample_v1",
   "sample_id": "sample_000001",
   "target_type": "parse_graph",
-  "nodes": [],
-  "relations": [],
-  "residuals": [],
+  "parse_graph": {
+    "nodes": [],
+    "relations": [],
+    "residuals": []
+  },
   "sampling_metadata": {
     "model": "graph_transformer_v1",
     "seed": 123,
@@ -914,7 +931,15 @@ cost breakdown
   "source_evidence": "...",
   "selected_explanations": [],
   "generator_target": {
-    "parse_graph": {}
+    "format": "maskgen_generator_target_v1",
+    "target_type": "parse_graph",
+    "size": [256, 256],
+    "parse_graph": {
+      "nodes": [],
+      "relations": [],
+      "residuals": []
+    },
+    "metadata": {}
   },
   "diagnostics": {}
 }
@@ -923,7 +948,8 @@ cost breakdown
 其中：
 
 - `selected_explanations` 是解释器自己的完整输出。
-- `parse_graph` 是给生成器学习的目标。
+- `generator_target.parse_graph` 是给生成器学习的图内容。
+- `generator_target.metadata` 记录训练、渲染和验证相关元数据。
 - `diagnostics` 包含代价、残差、稳定性、渲染验证等信息。
 
 ---
@@ -1148,10 +1174,18 @@ data/remote_256_generator_targets/<split>/graphs/<stem>.json
 ```json
 {
   "format": "maskgen_generator_target_v1",
+  "target_type": "parse_graph",
+  "size": [256, 256],
   "source_explanation": "...",
-  "parse_graph": {},
-  "render_validation": {},
-  "training_metadata": {}
+  "parse_graph": {
+    "nodes": [],
+    "relations": [],
+    "residuals": []
+  },
+  "metadata": {
+    "render_validation": {},
+    "training_metadata": {}
+  }
 }
 ```
 
@@ -1196,3 +1230,137 @@ Codex 在设计解释器时，应该从这个目标反推过程：
 - residual 是合法输出。
 - 所有目标必须可追溯到 evidence。
 - 所有目标必须可以被 renderer 验证。
+
+---
+
+## 21. 弱解释器 profile：`weak_convex_face_atoms_v1`
+
+当强解释器需要大量规则才能判断 `support_region`、`divider_region`、`insert_object` 时，可以先使用更保守的弱解释器 profile。
+
+该 profile 让生成器学习：
+
+```text
+全图 semantic faces
+每个 face 的 label
+每个 face 的 convex atoms
+face adjacency
+label groups
+```
+
+### 21.1 节点 role
+
+弱 profile 使用以下结构中性 role：
+
+```text
+label_group
+semantic_face
+convex_atom
+```
+
+示例：
+
+```json
+{
+  "id": "face_0",
+  "role": "semantic_face",
+  "label": 6,
+  "source_face_id": 12,
+  "geometry_model": "boundary_arcs",
+  "geometry": {
+    "outer_arc_refs": [],
+    "hole_arc_refs": []
+  },
+  "atom_ids": ["atom_0", "atom_1"]
+}
+```
+
+```json
+{
+  "id": "atom_0",
+  "role": "convex_atom",
+  "label": 6,
+  "parent_face": "face_0",
+  "geometry_model": "convex_polygon",
+  "geometry": {
+    "type": "quad",
+    "outer_local": [],
+    "vertex_count": 4,
+    "area": 120.0
+  }
+}
+```
+
+### 21.2 关系类型
+
+弱 profile 使用：
+
+```text
+label_group_contains
+atom_part_of
+face_adjacent
+```
+
+示例：
+
+```json
+{
+  "type": "atom_part_of",
+  "atom": "atom_0",
+  "face": "face_0"
+}
+```
+
+```json
+{
+  "type": "face_adjacent",
+  "faces": ["face_0", "face_1"],
+  "source_face_ids": [12, 18],
+  "labels": [6, 2],
+  "arc_ids": [33],
+  "shared_length": 42.0
+}
+```
+
+### 21.3 使用场景
+
+弱 profile 的优点：
+
+- 不依赖数据集专用语义。
+- 不需要判断道路、房屋、田地等类别的固定 role。
+- 仍然利用凸分割器，把复杂 face 拆成简单凸多边形。
+- 保留全图 adjacency 和共享边界 evidence。
+
+弱 profile 的缺点：
+
+- 序列通常比强解释器长。
+- 不直接表达“嵌入”“分隔”等高层生成原因。
+- 后续如果需要更强压缩，可以在弱 profile 之上再训练或搜索强解释模板。
+
+### 21.4 渲染验证
+
+弱 profile 可以通过 `convex_atom` 闭环验证：
+
+```text
+convex_atom local polygons
+  -> world-space polygons
+  -> per-face atom union
+  -> rendered partition
+  -> compare against evidence geometry
+```
+
+推荐记录：
+
+```json
+{
+  "format": "maskgen_weak_rendered_partition_v1",
+  "validation": {
+    "is_valid": true,
+    "full_iou": 1.0,
+    "overlap_area": 0.0,
+    "gap_area": 0.0,
+    "low_iou_face_ids": []
+  }
+}
+```
+
+这里的 `full_iou` 是 rendered atom union 与 evidence geometry 的 IoU。它不是和原始像素 mask 的 IoU。

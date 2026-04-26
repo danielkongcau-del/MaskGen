@@ -6,6 +6,8 @@
 
 本文件不是生成器训练计划，也不是新的几何近似器或分割器设计。
 
+当前推荐先实现并评估弱解释器 profile：`weak_convex_face_atoms_v1`。该 profile 不强制判断 support/divider/insert，而是把 evidence 打包成 semantic faces、convex atoms、label groups 和 adjacency。强语义解释器可以作为后续压缩层，而不是当前唯一主线。
+
 ---
 
 ## 1. 解释器在整体管线中的位置
@@ -163,7 +165,15 @@ residual_region
   "source_evidence": "...",
   "selected_explanations": [],
   "generator_target": {
-    "parse_graph": {}
+    "format": "maskgen_generator_target_v1",
+    "target_type": "parse_graph",
+    "size": [256, 256],
+    "parse_graph": {
+      "nodes": [],
+      "relations": [],
+      "residuals": []
+    },
+    "metadata": {}
   },
   "diagnostics": {},
   "validation": {}
@@ -207,9 +217,11 @@ residual_region
   "format": "maskgen_generator_target_v1",
   "target_type": "parse_graph",
   "size": [256, 256],
-  "nodes": [],
-  "relations": [],
-  "residuals": [],
+  "parse_graph": {
+    "nodes": [],
+    "relations": [],
+    "residuals": []
+  },
   "metadata": {
     "source_explanation": "...",
     "code_length": 0.0,
@@ -229,6 +241,34 @@ residual_region
 ---
 
 ## 4. 解释器应该如何处理输入数据
+
+### 4.0 弱解释器基线
+
+在强解释器之前，先建立一个确定性弱解释器：
+
+```text
+explanation evidence
+  -> label_group nodes
+  -> semantic_face nodes
+  -> convex_atom nodes
+  -> atom_part_of / face_adjacent / label_group_contains relations
+  -> weak parse_graph
+```
+
+该基线不解决“谁是 support、谁是 divider、谁是 insert”。它只保留稳定几何组成结构，让生成器先学习“用凸多边形拼搭 face”和“face 之间如何邻接”。
+
+这一路线的验收标准是：
+
+```text
+1. 每个 evidence face 都有 semantic_face node。
+2. 每个可用 convex atom 都有 convex_atom node。
+3. 每个 atom 通过 atom_part_of 指回 parent face。
+4. 每条 evidence adjacency 变成 face_adjacent relation。
+5. 同一 label 的 face 可以被 label_group 聚合。
+6. 输出仍然是 maskgen_generator_target_v1 / parse_graph。
+```
+
+弱解释器不是最终上限。它是稳定训练目标和强解释器对照组。
 
 ### 4.1 阶段一：加载与基础验证
 
@@ -290,6 +330,83 @@ residual_region candidate
 - compactness / solidity。
 
 这些证据只用于生成候选和评分，不应被写成不可迁移的类别规则。
+
+### 4.3.1 图内 label-role 一致性
+
+仅靠 face-local cost 会导致同一张图中同一 `label` 被大量解释成不同 `role`。这会增加生成器学习难度。
+
+但 `role` 本质上不是绝对属性，而是关系属性。因此，第一版解释器不应该只靠 face-local role 分类，而应先做 label-pair relation pass：
+
+```text
+1. 找出图中相邻的 label pair。
+2. 对每个 label pair 生成候选解释：
+   - A support, B insert
+   - B support, A insert
+   - A support, B divider
+   - B support, A divider
+   - A/B adjacent supports
+   - independent / residual
+3. 为每个候选计算 code length。
+4. 选择低成本候选。
+5. 把候选中的 role 作为该 label 在当前图中的关系证据。
+```
+
+当前初版实现采用 `partition_gen/pairwise_relation_explainer.py`。它不是直接按面积或类别名判定 role，而是把每个相邻 label pair 构造成二类子场景：
+
+```text
+label A geometry + label B geometry
+  -> 生成候选解释
+  -> 对候选中的 support 补全策略进行评分
+  -> 调用已有 convex partition 估计几何 code length
+  -> 选择低表示代价解释
+```
+
+其中：
+
+- `support_with_inserts` 要求补全后的 support 能覆盖 insert；否则该候选会被惩罚。
+- insert 不能比 support 更大；单个过大的连通块也不应被当作普通嵌入物。
+- `split_by_divider` 要求 divider 被补全后的 support 覆盖；这种覆盖是预期行为，不应作为 false cover。
+- divider 候选会考虑细长度、上下文共享强度、面积比例和碎片数量。
+- `convex_hull_fill` 不是免费操作；support 补全面积越大，候选代价越高。
+
+这一步的目的不是得到最终全局最优解释，而是给 image-level consistency pass 提供更可靠的关系证据。
+
+然后再做 image-level consistency pass：
+
+```text
+1. 对每个 face 保留所有 role candidate cost。
+2. 优先使用 label-pair relation pass 给出的 preferred role。
+3. 如果某个 label 没有足够 pairwise 证据，再看本地最低代价 role 的面积占比。
+4. 对偏离 dominant role 的 face 加一个结构不一致成本。
+5. 重新选择每个 face 的 role。
+```
+
+这里使用关系证据和面积占比，而不是简单 face 数量，是为了避免大量小碎片压过少数大主体区域。
+
+这不是硬规则：
+
+```text
+不是 label -> role 固定映射
+而是同一图内 label -> role 倾向
+```
+
+如果某个 face 的局部证据足够强，它仍然可以偏离 dominant role。解释器必须在 diagnostics 中记录这些例外：
+
+```json
+{
+  "label_role_summary": {
+    "4": {
+      "dominant_role": "divider_region",
+      "counts_before": {},
+      "counts_after_consistency": {},
+      "counts_final": {},
+      "override_face_ids": []
+    }
+  }
+}
+```
+
+这一步仍然是基于 code length 的相对代价，不应写成 `label == X -> role == Y`。
 
 ### 4.4 阶段四：构建局部 patch
 
@@ -442,10 +559,15 @@ adjacent_to relations
 选择完成后，解释器生成全图 `parse_graph`：
 
 ```text
-nodes
-relations
-residuals
-metadata
+generator_target
+  format = maskgen_generator_target_v1
+  target_type = parse_graph
+  size
+  parse_graph
+    nodes
+    relations
+    residuals
+  metadata
 ```
 
 必须做规范化：
@@ -688,13 +810,14 @@ docs/explanation_evidence.md
 1. 能读取一个 evidence JSON。
 2. 能输出 maskgen_explanation_v1。
 3. 输出中包含 selected_explanations。
-4. 输出中包含 generator_target.parse_graph。
-5. parse_graph 使用 role / label / geometry_model 分离设计。
-6. 不输出正式 program_sequence。
-7. 不强制中心线宽度图。
-8. 所有未解释 face 都进入 residual。
-9. diagnostics 明确记录 residual 比例和选择方法。
-10. 可视化能看出哪些区域被解释成 support / divider / insert / residual。
+4. 输出中包含完整的 generator_target 对象。
+5. generator_target.parse_graph 中包含 nodes / relations / residuals。
+6. parse_graph 使用 role / label / geometry_model 分离设计。
+7. 不输出正式 program_sequence。
+8. 不强制中心线宽度图。
+9. 所有未解释 face 都进入 residual。
+10. diagnostics 明确记录 residual 比例和选择方法。
+11. 可视化能看出哪些区域被解释成 support / divider / insert / residual。
 ```
 
 如果某个困难算法尚未实现，必须明确记录：
