@@ -73,7 +73,8 @@ generator or renderer that iterates through nodes from rendering grouping/contex
 - By default, same-label support faces are split by adjacency-connected components, not globally unioned.
 - Builds one `insert_object_group` per support component that owns matched subject-label inserts.
 - Builds one `insert_object` per matched subject-label face.
-- Emits `inserted_in` and `contains` relations.
+- Emits `inserted_in` and `contains` relations. `inserted_in.container` is the semantic
+  container endpoint; `support` is emitted as a legacy alias for existing consumers.
 - If an insert face matches multiple support labels, the support label with the largest shared boundary wins.
 
 `DIVIDES(subject_label, object_label)`:
@@ -81,7 +82,8 @@ generator or renderer that iterates through nodes from rendering grouping/contex
 - Builds one or more `divider_region` nodes for subject-label faces adjacent to object-label faces.
 - By default, same-label divider faces are split by adjacency-connected components.
 - Builds component-level `support_region` nodes for matched object-label faces.
-- Emits one `divides` relation for each touching divider/support component pair.
+- Emits one `divides` relation for each touching divider/target component pair.
+  `divides.target` is the semantic target endpoint; `support` is emitted as a legacy alias.
 
 `PARALLEL(subject_label, object_label)`:
 
@@ -152,6 +154,7 @@ Only touching component pairs receive relations. Therefore if a label already ha
 {
   "type": "divides",
   "divider": "divider_0",
+  "target": "insert_group_0",
   "support": "insert_group_0"
 }
 ```

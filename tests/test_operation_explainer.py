@@ -342,6 +342,36 @@ class OperationExplainerTests(unittest.TestCase):
         self.assertEqual(length["evidence_reference_count"], 0)
         self.assertEqual(length["total"], config.token_relation_type + 2 * config.token_relation_endpoint)
 
+    def test_relation_inserted_in_container_preferred_over_legacy_support(self) -> None:
+        config = OperationExplainerConfig()
+        length = relation_code_length(
+            {
+                "type": "inserted_in",
+                "object": "insert_group_0",
+                "container": "support_0",
+                "support": "legacy_support_0",
+            },
+            config,
+        )
+        self.assertEqual(length["semantic_endpoint_count"], 2)
+        self.assertEqual(length["semantic_keys"], ["object", "container"])
+        self.assertEqual(length["total"], config.token_relation_type + 2 * config.token_relation_endpoint)
+
+    def test_relation_divides_target_preferred_over_legacy_support(self) -> None:
+        config = OperationExplainerConfig()
+        length = relation_code_length(
+            {
+                "type": "divides",
+                "divider": "divider_0",
+                "target": "insert_group_0",
+                "support": "legacy_support_0",
+            },
+            config,
+        )
+        self.assertEqual(length["semantic_endpoint_count"], 2)
+        self.assertEqual(length["semantic_keys"], ["divider", "target"])
+        self.assertEqual(length["total"], config.token_relation_type + 2 * config.token_relation_endpoint)
+
     def test_relation_code_length_does_not_count_evidence_refs_by_default(self) -> None:
         config = OperationExplainerConfig()
         relation = {
@@ -497,6 +527,9 @@ class OperationExplainerTests(unittest.TestCase):
         self.assertIn("insert_object", roles)
         self.assertIn("inserted_in", relation_types)
         self.assertIn("contains", relation_types)
+        inserted_in = [relation for relation in graph["relations"] if relation["type"] == "inserted_in"]
+        self.assertTrue(inserted_in)
+        self.assertEqual(inserted_in[0]["container"], inserted_in[0]["support"])
 
     def test_token_length_divide_by_region_selected_when_compressive(self) -> None:
         left = _face(0, 0, [[0, 0], [9, 0], [9, 20], [0, 20]], degree=1)
@@ -515,6 +548,9 @@ class OperationExplainerTests(unittest.TestCase):
         self.assertIn("support_region", roles)
         self.assertIn("divider_region", roles)
         self.assertIn("divides", relation_types)
+        divides = [relation for relation in graph["relations"] if relation["type"] == "divides"]
+        self.assertTrue(divides)
+        self.assertEqual(divides[0]["target"], divides[0]["support"])
 
     def test_token_length_does_not_select_non_compressive_high_level_operation(self) -> None:
         first = _face(0, 0, [[0, 0], [2, 0], [2, 2], [0, 2]], degree=0)

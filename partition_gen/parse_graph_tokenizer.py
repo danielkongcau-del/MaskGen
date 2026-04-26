@@ -6,6 +6,8 @@ import math
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence
 
+from partition_gen.parse_graph_relations import divides_target, inserted_in_container
+
 
 STATIC_TOKENS = [
     "<PAD>",
@@ -311,14 +313,14 @@ def _encode_manual_convex_atoms(tokens: List[str], atoms: Sequence[dict], *, con
 def _manual_relation_endpoint_indices(relation: dict, node_index_by_id: Dict[str, int]) -> List[int]:
     relation_type = str(relation.get("type"))
     if relation_type == "inserted_in":
-        keys = ["object", "support"]
-        return [node_index_by_id[str(relation[key])] for key in keys if str(relation.get(key)) in node_index_by_id]
+        endpoints = [relation.get("object"), inserted_in_container(relation)]
+        return [node_index_by_id[str(value)] for value in endpoints if value is not None and str(value) in node_index_by_id]
     if relation_type == "contains":
         keys = ["parent", "child"]
         return [node_index_by_id[str(relation[key])] for key in keys if str(relation.get(key)) in node_index_by_id]
     if relation_type == "divides":
-        keys = ["divider", "support"]
-        return [node_index_by_id[str(relation[key])] for key in keys if str(relation.get(key)) in node_index_by_id]
+        endpoints = [relation.get("divider"), divides_target(relation)]
+        return [node_index_by_id[str(value)] for value in endpoints if value is not None and str(value) in node_index_by_id]
     if relation_type == "adjacent_to":
         return [node_index_by_id[str(node_id)] for node_id in relation.get("faces", []) if str(node_id) in node_index_by_id]
     return []

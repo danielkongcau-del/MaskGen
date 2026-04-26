@@ -12,6 +12,7 @@ from partition_gen.operation_geometry import (
 )
 from partition_gen.operation_label_pair_prior import REL_DIVIDES, REL_INSERTED_IN, REL_PARALLEL
 from partition_gen.operation_role_spec import validate_role_spec
+from partition_gen.parse_graph_relations import relation_refs
 
 
 @dataclass(frozen=True)
@@ -503,13 +504,9 @@ def _validate_parse_graph(nodes: Sequence[Dict[str, object]], relations: Sequenc
     node_ids = {str(node.get("id")) for node in nodes}
     missing_refs = []
     for relation in relations:
-        for key in ("parent", "child", "object", "support", "divider", "owner", "residual"):
-            if key in relation and str(relation[key]) not in node_ids:
-                missing_refs.append({"relation": relation.get("id"), "field": key, "value": relation[key]})
-        for key in ("faces",):
-            for value in relation.get(key, []):
-                if str(value) not in node_ids:
-                    missing_refs.append({"relation": relation.get("id"), "field": key, "value": value})
+        for key, value in relation_refs(relation):
+            if str(value) not in node_ids:
+                missing_refs.append({"relation": relation.get("id"), "field": key, "value": value})
     return {
         "node_reference_valid": bool(not missing_refs),
         "relation_reference_valid": bool(not missing_refs),
@@ -794,6 +791,7 @@ def build_manual_rule_explanation_payload(
                     "id": f"relation_{len(relations)}",
                     "type": "inserted_in",
                     "object": group_id,
+                    "container": support_node_id,
                     "support": support_node_id,
                     "face_ids": sorted(group_insert_face_ids),
                     "rule_ids": list(record.get("rule_ids", [])),
@@ -843,6 +841,7 @@ def build_manual_rule_explanation_payload(
                     "id": f"relation_{len(relations)}",
                     "type": "divides",
                     "divider": divider_info["id"],
+                    "target": support_info["id"],
                     "support": support_info["id"],
                     "induced_face_ids": support_face_ids,
                     "divider_face_ids": divider_face_ids,

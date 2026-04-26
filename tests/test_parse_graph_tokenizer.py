@@ -182,6 +182,45 @@ class ParseGraphTokenizerTest(unittest.TestCase):
         self.assertIn("GEOM_NONE", tokens)
         self.assertNotIn("POLY", tokens)
 
+    def test_manual_relation_new_container_and_target_fields_encode(self) -> None:
+        target = {
+            "format": "maskgen_generator_target_v1",
+            "target_type": "parse_graph",
+            "size": [256, 256],
+            "parse_graph": {
+                "nodes": [
+                    {"id": "support_0", "role": "support_region", "label": 0, "geometry_model": "none"},
+                    {"id": "divider_0", "role": "divider_region", "label": 2, "geometry_model": "none"},
+                    {"id": "insert_group_0", "role": "insert_object_group", "label": 1, "geometry_model": "none"},
+                ],
+                "relations": [
+                    {
+                        "id": "relation_0",
+                        "type": "inserted_in",
+                        "object": "insert_group_0",
+                        "container": "support_0",
+                        "support": "legacy_support_ignored",
+                    },
+                    {
+                        "id": "relation_1",
+                        "type": "divides",
+                        "divider": "divider_0",
+                        "target": "insert_group_0",
+                        "support": "legacy_support_ignored",
+                    },
+                ],
+                "residuals": [],
+            },
+            "metadata": {},
+        }
+        config = ParseGraphTokenizerConfig(coord_bins=32, area_bins=64, max_int=256)
+        vocab = build_token_vocabulary(config)
+        tokens = encode_generator_target(target, config=config)
+        ids = tokens_to_ids(tokens, vocab)
+        self.assertIn("REL_INSERTED_IN", tokens)
+        self.assertIn("REL_DIVIDES", tokens)
+        self.assertNotIn(vocab["<UNK>"], ids)
+
 
 if __name__ == "__main__":
     unittest.main()

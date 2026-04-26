@@ -302,7 +302,11 @@ false_cover_ratio > false_cover_ratio_invalid
 - 节点的 `geometry_model`
 - 节点几何或凸块几何
 - 关系类型
-- 关系的语义端点，例如 `object`、`support`、`divider`、`parent`、`child`、`faces`
+- 关系的语义端点，例如 `object`、`container`、`divider`、`target`、`parent`、`child`、`faces`
+
+`inserted_in.container` 和 `divides.target` 是新的语义端点字段。`support` 仍作为旧 JSON
+兼容别名保留；token length、validation 和 tokenizer 都应优先读取 `container` / `target`，
+缺失时再回退到 `support`。
 
 默认不编码 evidence/debug 追溯字段：
 

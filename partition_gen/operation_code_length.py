@@ -10,6 +10,7 @@ from partition_gen.operation_types import (
     OperationCandidate,
     OperationExplainerConfig,
 )
+from partition_gen.parse_graph_relations import relation_refs
 
 
 def polygon_code_length_from_payload(geometry_payload: Dict[str, object], config: OperationExplainerConfig) -> Dict[str, object]:
@@ -121,21 +122,14 @@ def _reference_count(value: object) -> int:
 
 
 def relation_reference_counts(relation: Dict[str, object], config: OperationExplainerConfig) -> Dict[str, object]:
-    scalar_semantic_keys = ("parent", "child", "object", "support", "divider", "owner", "residual", "atom", "face")
-    list_semantic_keys = ("faces",)
     scalar_evidence_keys = ("source_face_id", "source_atom_id")
     list_evidence_keys = ("face_ids", "source_face_ids", "arc_ids", "atom_ids", "source_arc_ids")
 
-    semantic_endpoint_count = 0
+    semantic_refs = relation_refs(relation)
+    semantic_endpoint_count = len(semantic_refs)
     evidence_reference_count = 0
-    semantic_keys = []
+    semantic_keys = [key for key, _ in semantic_refs]
     evidence_keys = []
-
-    for key in scalar_semantic_keys + list_semantic_keys:
-        count = _reference_count(relation.get(key)) if key in relation else 0
-        if count:
-            semantic_endpoint_count += count
-            semantic_keys.append(key)
 
     for key in scalar_evidence_keys + list_evidence_keys:
         count = _reference_count(relation.get(key)) if key in relation else 0

@@ -135,6 +135,9 @@ class ManualRuleExplainerTests(unittest.TestCase):
         self.assertIn("insert_object", roles)
         self.assertIn("inserted_in", relation_types)
         self.assertIn("contains", relation_types)
+        inserted_in = [relation for relation in graph["relations"] if relation["type"] == "inserted_in"]
+        self.assertTrue(inserted_in)
+        self.assertEqual(inserted_in[0]["container"], inserted_in[0]["support"])
         self.assertEqual(payload["diagnostics"]["residual_face_count"], 0)
         self.assertEqual(payload["diagnostics"]["duplicate_owned_face_count"], 0)
         self.assertTrue(payload["validation"]["all_faces_owned_exactly_once"])
@@ -158,6 +161,9 @@ class ManualRuleExplainerTests(unittest.TestCase):
         self.assertIn("support_region", roles)
         self.assertIn("divider_region", roles)
         self.assertIn("divides", relation_types)
+        divides = [relation for relation in graph["relations"] if relation["type"] == "divides"]
+        self.assertTrue(divides)
+        self.assertEqual(divides[0]["target"], divides[0]["support"])
         self.assertEqual(payload["diagnostics"]["residual_face_count"], 0)
         self.assertEqual(payload["diagnostics"]["duplicate_owned_face_count"], 0)
         self.assertTrue(payload["validation"]["all_faces_owned_exactly_once"])
@@ -249,6 +255,7 @@ class ManualRuleExplainerTests(unittest.TestCase):
         divides = [relation for relation in graph["relations"] if relation["type"] == "divides"]
         self.assertTrue(divides)
         self.assertIn(divides[0]["support"], group_ids)
+        self.assertEqual(divides[0]["target"], divides[0]["support"])
         self.assertEqual(payload["diagnostics"]["duplicate_owned_face_count"], 0)
         self.assertTrue(payload["validation"]["all_faces_owned_exactly_once"])
 
@@ -408,6 +415,7 @@ class ManualRuleExplainerTests(unittest.TestCase):
         divides = [relation for relation in graph["relations"] if relation["type"] == "divides"]
         self.assertEqual(len(divides), 1)
         target_group = groups[divides[0]["support"]]
+        self.assertEqual(divides[0]["target"], divides[0]["support"])
         self.assertEqual(target_group["evidence"]["referenced_face_ids"], [3])
         self.assertEqual(payload["diagnostics"]["residual_face_count"], 0)
         self.assertTrue(payload["validation"]["all_faces_owned_exactly_once"])

@@ -342,7 +342,14 @@ def _overlay_candidates(
                 "evidence": {"face_ids": [int(face["id"]) for face in inserts], "arc_ids": list(arc_ids)},
             },
         ]
-        relations = [{"type": "inserted_in", "object": group_node_id, "support": support_node_id}]
+        relations = [
+            {
+                "type": "inserted_in",
+                "object": group_node_id,
+                "container": support_node_id,
+                "support": support_node_id,
+            }
+        ]
         for insert_index, insert in enumerate(inserts):
             insert_node_id = f"{candidate_id}_insert_{insert_index}"
             nodes.append(_face_polygon_node(insert_node_id, "insert_object", insert, evidence_arc_ids=arc_ids, config=config))
@@ -495,7 +502,14 @@ def _divider_candidates(
             ),
             divider_node,
         ]
-        relations = [{"type": "divides", "divider": divider_node_id, "support": support_node_id}]
+        relations = [
+            {
+                "type": "divides",
+                "divider": divider_node_id,
+                "target": support_node_id,
+                "support": support_node_id,
+            }
+        ]
         covered = [*divider_face_ids, *support_face_ids]
         consistency = _label_pair_consistency_metadata(
             label_pair_prior_payload=label_pair_prior_payload,

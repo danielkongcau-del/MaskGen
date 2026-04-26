@@ -611,9 +611,14 @@ skeleton_width_graph
 {
   "type": "inserted_in",
   "object": "insert_0",
+  "container": "support_0",
   "support": "support_0"
 }
 ```
+
+`container` is the semantic endpoint: it can point to a `support_region`, `insert_object_group`,
+`insert_object`, or another context node. `support` is retained as a legacy compatibility alias.
+Consumers should prefer `container` when present and fall back to `support` for older JSON.
 
 `inserted_in` 的渲染语义是覆盖式嵌入：
 
@@ -641,10 +646,16 @@ hole        = support 中存在没有独立语义对象的负空间
 {
   "type": "divides",
   "divider": "divider_0",
+  "target": "support_0",
   "support": "support_0",
   "induced_face_ids": [5, 6, 7, 8]
 }
 ```
+
+`target` is the semantic endpoint being organized or divided. It can point to a
+`support_region`, `insert_object_group`, `insert_object`, or another context node. `support`
+is retained as a legacy compatibility alias. Consumers should prefer `target` when present
+and fall back to `support` for older JSON.
 
 ### 8.4 `adjacent_to`
 

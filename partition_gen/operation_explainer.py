@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Sequence
 
 from partition_gen.explainer import ExplainerConfig, build_explanation_payload
 from partition_gen.operation_candidates import propose_operation_candidates_with_diagnostics
@@ -17,6 +17,7 @@ from partition_gen.operation_types import (
     OperationExplainerConfig,
     OperationSelectionResult,
 )
+from partition_gen.parse_graph_relations import relation_refs
 from partition_gen.pairwise_relation_explainer import PairwiseRelationConfig, build_pairwise_relation_payload
 from partition_gen.weak_explainer import WeakExplainerConfig, build_weak_explanation_payload
 
@@ -69,18 +70,6 @@ def _candidate_public(candidate: OperationCandidate) -> Dict[str, object]:
         "false_cover": candidate.cost_breakdown.get("false_cover", {}) if candidate.cost_breakdown else {},
         "cost_breakdown": candidate.cost_breakdown,
     }
-
-
-def _relation_refs(relation: Dict[str, object]) -> List[Tuple[str, str]]:
-    refs: List[Tuple[str, str]] = []
-    for key in ("parent", "child", "object", "support", "divider", "owner", "residual"):
-        if key in relation:
-            refs.append((key, str(relation[key])))
-    for key in ("faces",):
-        if key in relation:
-            for value in relation.get(key, []):
-                refs.append((key, str(value)))
-    return refs
 
 
 def _rewrite_value(value, node_id_map: Dict[str, str]):
@@ -168,7 +157,7 @@ def _validate(
     node_ids = {str(node["id"]) for node in nodes}
     missing_refs = []
     for relation in relations:
-        for field, value in _relation_refs(relation):
+        for field, value in relation_refs(relation):
             if value not in node_ids:
                 missing_refs.append({"relation": relation.get("id"), "field": field, "value": value})
     evidence_validation = evidence_payload.get("evidence_validation", {})
