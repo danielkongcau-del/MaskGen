@@ -259,7 +259,7 @@ class ManualRuleExplainerTests(unittest.TestCase):
         self.assertEqual(payload["diagnostics"]["duplicate_owned_face_count"], 0)
         self.assertTrue(payload["validation"]["all_faces_owned_exactly_once"])
 
-    def test_nested_insert_can_use_reference_only_support(self) -> None:
+    def test_nested_insert_reuses_local_insert_group_as_container(self) -> None:
         field = _face(0, 6, [[0, 0], [20, 0], [20, 20], [0, 20]], degree=1)
         woodland = _face(1, 5, [[2, 2], [12, 2], [12, 12], [2, 12]], degree=2)
         building = _face(2, 1, [[4, 4], [6, 4], [6, 6], [4, 6]], degree=1)
@@ -281,14 +281,21 @@ class ManualRuleExplainerTests(unittest.TestCase):
         )
         graph = payload["generator_target"]["parse_graph"]
         reference_supports = [node for node in graph["nodes"] if node.get("is_reference_only")]
-        self.assertTrue(reference_supports)
-        self.assertEqual(reference_supports[0]["evidence"]["owned_face_ids"], [])
-        self.assertEqual(reference_supports[0]["evidence"]["referenced_face_ids"], [1])
+        self.assertFalse(reference_supports)
+        groups_by_label = {int(node["label"]): node for node in graph["nodes"] if node["role"] == "insert_object_group"}
+        self.assertIn(5, groups_by_label)
+        self.assertIn(1, groups_by_label)
+        building_relation = next(
+            relation
+            for relation in graph["relations"]
+            if relation["type"] == "inserted_in" and relation["object"] == groups_by_label[1]["id"]
+        )
+        self.assertEqual(building_relation["container"], groups_by_label[5]["id"])
         self.assertEqual(payload["diagnostics"]["residual_face_count"], 0)
         self.assertEqual(payload["diagnostics"]["duplicate_owned_face_count"], 0)
         self.assertTrue(payload["validation"]["all_faces_owned_exactly_once"])
 
-    def test_sanitized_reference_only_node_is_non_renderable_context(self) -> None:
+    def test_sanitized_context_nodes_are_non_renderable(self) -> None:
         field = _face(0, 6, [[0, 0], [20, 0], [20, 20], [0, 20]], degree=1)
         woodland = _face(1, 5, [[2, 2], [12, 2], [12, 12], [2, 12]], degree=2)
         building = _face(2, 1, [[4, 4], [6, 4], [6, 6], [4, 6]], degree=1)
@@ -304,19 +311,13 @@ class ManualRuleExplainerTests(unittest.TestCase):
         target = sanitize_generator_target(payload["generator_target"])
         graph = target["parse_graph"]
         reference_nodes = [node for node in graph["nodes"] if node.get("is_reference_only")]
-        self.assertTrue(reference_nodes)
+        self.assertFalse(reference_nodes)
         group_nodes = [node for node in graph["nodes"] if node["role"] == "insert_object_group"]
         self.assertTrue(group_nodes)
         self.assertTrue(all(node["geometry_model"] == "none" and node["renderable"] is False for node in group_nodes))
-        for node in reference_nodes:
-            self.assertFalse(node["renderable"])
-            self.assertEqual(node["geometry_model"], "none")
-            self.assertNotIn("frame", node)
-            self.assertNotIn("geometry", node)
-            self.assertNotIn("atoms", node)
         node_ids = {node["id"] for node in graph["nodes"]}
         for relation in graph["relations"]:
-            for key in ("object", "support", "parent", "child", "divider"):
+            for key in ("object", "container", "support", "target", "parent", "child", "divider"):
                 if key in relation:
                     self.assertIn(relation[key], node_ids)
             for node_id in relation.get("faces", []):

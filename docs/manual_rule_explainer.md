@@ -142,11 +142,21 @@ The builder does not hard-code any dataset-specific chain. It follows the explic
 
 ```text
 DIVIDES subject:
-  divider node -> insert group -> support node
+  divider node -> insert group -> insert object -> support node
 
-DIVIDES object / PARALLEL side:
-  support node -> insert group -> divider node
+inserted_in container:
+  support node -> insert group -> insert object -> reference-only context node
+
+DIVIDES target:
+  insert group -> support node -> insert object -> divider node -> reference-only context node
+
+PARALLEL peer:
+  support node -> insert group -> insert object -> divider node -> reference-only context node
 ```
+
+Nested `INSERTED_IN` rules are processed from outer context to inner context when possible. This
+lets a later inner relation reuse the outer `insert_object_group` instead of creating a duplicate
+reference-only support node.
 
 Only touching component pairs receive relations. Therefore if a label already has multiple `insert_object_group` nodes, later rules reference the local group that actually touches the other endpoint. For example, `DIVIDES(road, building)` can produce:
 

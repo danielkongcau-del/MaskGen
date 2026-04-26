@@ -500,6 +500,37 @@ def _relation_sort_key(relation: Dict[str, object]) -> Tuple[int, str]:
     return int(order.get(str(relation.get("type")), 99)), str(relation.get("id", ""))
 
 
+def _insert_record_depths(records: Sequence[Dict[str, object]]) -> Dict[int, int]:
+    parents_by_subject: Dict[int, set[int]] = {}
+    labels = set()
+    for record in records:
+        subject = int(record["subject_label"])
+        obj = int(record["object_label"])
+        parents_by_subject.setdefault(subject, set()).add(obj)
+        labels.add(subject)
+        labels.add(obj)
+
+    memo: Dict[int, int] = {}
+
+    def depth(label: int, visiting: set[int]) -> int:
+        if label in memo:
+            return memo[label]
+        if label in visiting:
+            memo[label] = 0
+            return 0
+        parents = parents_by_subject.get(label, set())
+        if not parents:
+            memo[label] = 0
+            return 0
+        visiting.add(label)
+        value = 1 + max(depth(parent, visiting) for parent in parents)
+        visiting.remove(label)
+        memo[label] = int(value)
+        return int(value)
+
+    return {int(label): depth(int(label), set()) for label in labels}
+
+
 def _validate_parse_graph(nodes: Sequence[Dict[str, object]], relations: Sequence[Dict[str, object]]) -> Dict[str, object]:
     node_ids = {str(node.get("id")) for node in nodes}
     missing_refs = []
@@ -580,6 +611,7 @@ def build_manual_rule_explanation_payload(
     support_node_infos_by_label: Dict[int, List[Dict[str, object]]] = {}
     divider_node_infos_by_label: Dict[int, List[Dict[str, object]]] = {}
     insert_group_infos_by_label: Dict[int, List[Dict[str, object]]] = {}
+    insert_node_infos_by_label: Dict[int, List[Dict[str, object]]] = {}
     reference_support_node_infos_by_label: Dict[int, List[Dict[str, object]]] = {}
     owned_face_ids: set[int] = set()
     selected_explanations: List[Dict[str, object]] = []
@@ -688,40 +720,43 @@ def build_manual_rule_explanation_payload(
             created.append(reference_support_node_infos_by_label[label][-1])
         return created
 
-    def relation_endpoint_infos_for_label(label: int, preferred: str, fallback_face_ids: Sequence[int]) -> List[Dict[str, object]]:
-        label = int(label)
-        if preferred == "divider":
-            infos = _node_infos_intersecting(divider_node_infos_by_label.get(label, []), fallback_face_ids)
-            if infos:
-                return infos
-            infos = _node_infos_intersecting(insert_group_infos_by_label.get(label, []), fallback_face_ids)
-            if infos:
-                return infos
-            infos = _node_infos_intersecting(support_node_infos_by_label.get(label, []), fallback_face_ids)
-            if infos:
-                return infos
-            return ensure_support_node_infos_for_label(label, fallback_face_ids)
-        if preferred == "insert_group":
-            infos = _node_infos_intersecting(insert_group_infos_by_label.get(label, []), fallback_face_ids)
-            if infos:
-                return infos
-            infos = _node_infos_intersecting(support_node_infos_by_label.get(label, []), fallback_face_ids)
-            if infos:
-                return infos
-            infos = _node_infos_intersecting(divider_node_infos_by_label.get(label, []), fallback_face_ids)
-            if infos:
-                return infos
-            return ensure_support_node_infos_for_label(label, fallback_face_ids)
+    def infos_from_mapping(
+        mapping: Dict[int, List[Dict[str, object]]],
+        label: int,
+        fallback_face_ids: Sequence[int],
+    ) -> List[Dict[str, object]]:
+        return _node_infos_intersecting(mapping.get(int(label), []), fallback_face_ids)
 
-        infos = _node_infos_intersecting(support_node_infos_by_label.get(label, []), fallback_face_ids)
-        if infos:
-            return infos
-        infos = _node_infos_intersecting(insert_group_infos_by_label.get(label, []), fallback_face_ids)
-        if infos:
-            return infos
-        infos = _node_infos_intersecting(divider_node_infos_by_label.get(label, []), fallback_face_ids)
-        if infos:
-            return infos
+    def resolve_container_endpoint_infos(label: int, fallback_face_ids: Sequence[int]) -> List[Dict[str, object]]:
+        label = int(label)
+        for mapping in (support_node_infos_by_label, insert_group_infos_by_label, insert_node_infos_by_label):
+            infos = infos_from_mapping(mapping, label, fallback_face_ids)
+            if infos:
+                return infos
+        return ensure_support_node_infos_for_label(label, fallback_face_ids)
+
+    def resolve_target_endpoint_infos(label: int, fallback_face_ids: Sequence[int]) -> List[Dict[str, object]]:
+        label = int(label)
+        for mapping in (insert_group_infos_by_label, support_node_infos_by_label, insert_node_infos_by_label, divider_node_infos_by_label):
+            infos = infos_from_mapping(mapping, label, fallback_face_ids)
+            if infos:
+                return infos
+        return ensure_support_node_infos_for_label(label, fallback_face_ids)
+
+    def resolve_peer_endpoint_infos(label: int, fallback_face_ids: Sequence[int]) -> List[Dict[str, object]]:
+        label = int(label)
+        for mapping in (support_node_infos_by_label, insert_group_infos_by_label, insert_node_infos_by_label, divider_node_infos_by_label):
+            infos = infos_from_mapping(mapping, label, fallback_face_ids)
+            if infos:
+                return infos
+        return ensure_support_node_infos_for_label(label, fallback_face_ids)
+
+    def resolve_divider_endpoint_infos(label: int, fallback_face_ids: Sequence[int]) -> List[Dict[str, object]]:
+        label = int(label)
+        for mapping in (divider_node_infos_by_label, insert_group_infos_by_label, insert_node_infos_by_label, support_node_infos_by_label):
+            infos = infos_from_mapping(mapping, label, fallback_face_ids)
+            if infos:
+                return infos
         return ensure_support_node_infos_for_label(label, fallback_face_ids)
 
     def best_support_info_for_face(face_id: int, support_infos: Sequence[Dict[str, object]]) -> Dict[str, object] | None:
@@ -736,10 +771,18 @@ def build_manual_rule_explanation_payload(
     insert_records = [record for record in relation_records if record["relation_type"] == REL_INSERTED_IN]
     insert_node_counter = 0
     insert_group_counter = 0
-    for record in sorted(insert_records, key=lambda item: (item["object_label"], item["subject_label"])):
+    insert_label_depths = _insert_record_depths(insert_records)
+    for record in sorted(
+        insert_records,
+        key=lambda item: (
+            insert_label_depths.get(int(item["subject_label"]), 0),
+            int(item["object_label"]),
+            int(item["subject_label"]),
+        ),
+    ):
         support_label = int(record["object_label"])
         insert_label = int(record["subject_label"])
-        support_infos = ensure_support_node_infos_for_label(support_label, record.get("support_face_ids", []))
+        support_infos = resolve_container_endpoint_infos(support_label, record.get("support_face_ids", []))
         if not support_infos:
             continue
         insert_face_ids = [face_id for face_id in record["insert_face_ids"] if face_id in faces_by_id]
@@ -807,6 +850,13 @@ def build_manual_rule_explanation_payload(
                 node["parent_group"] = group_id
                 node["support_id"] = support_node_id
                 nodes.append(node)
+                add_node_info(
+                    insert_node_infos_by_label,
+                    insert_label,
+                    node_id,
+                    [face_id],
+                    role="insert_object",
+                )
                 group_node["children"].append(node_id)
                 owned_face_ids.add(face_id)
                 relations.append(
@@ -820,14 +870,12 @@ def build_manual_rule_explanation_payload(
                 )
 
     for record in sorted([item for item in relation_records if item["relation_type"] == REL_DIVIDES], key=lambda item: (item["subject_label"], item["object_label"])):
-        divider_infos = relation_endpoint_infos_for_label(
+        divider_infos = resolve_divider_endpoint_infos(
             int(record["subject_label"]),
-            "divider",
             record.get("divider_face_ids", []),
         )
-        support_infos = relation_endpoint_infos_for_label(
+        support_infos = resolve_target_endpoint_infos(
             int(record["object_label"]),
-            "support",
             record.get("support_face_ids", []),
         )
         if not divider_infos or not support_infos:
@@ -851,8 +899,8 @@ def build_manual_rule_explanation_payload(
             )
 
     for record in sorted([item for item in relation_records if item["relation_type"] == REL_PARALLEL], key=lambda item: (item["subject_label"], item["object_label"])):
-        left_infos = relation_endpoint_infos_for_label(int(record["subject_label"]), "support", record.get("left_face_ids", []))
-        right_infos = relation_endpoint_infos_for_label(int(record["object_label"]), "support", record.get("right_face_ids", []))
+        left_infos = resolve_peer_endpoint_infos(int(record["subject_label"]), record.get("left_face_ids", []))
+        right_infos = resolve_peer_endpoint_infos(int(record["object_label"]), record.get("right_face_ids", []))
         if not left_infos or not right_infos:
             continue
         for left_info, right_info in _node_infos_touching(left_infos, right_infos, adjacency):
