@@ -63,13 +63,11 @@ def iter_evidence_paths(root: Path, split: str | None = None) -> Iterable[Path]:
 def _strip_node_for_training(node: dict) -> dict:
     cleaned = copy.deepcopy(node)
     if bool(cleaned.get("is_reference_only", False)):
-        cleaned["renderable"] = False
         cleaned["geometry_model"] = "none"
         cleaned.pop("frame", None)
         cleaned.pop("geometry", None)
         cleaned.pop("atoms", None)
-    else:
-        cleaned.setdefault("renderable", True)
+    cleaned["renderable"] = bool(str(cleaned.get("geometry_model", "none")) != "none")
     cleaned.pop("evidence", None)
     cleaned.pop("source_face_id", None)
     cleaned.pop("source_atom_id", None)

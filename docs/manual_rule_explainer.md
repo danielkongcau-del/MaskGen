@@ -60,10 +60,10 @@ The top-level output format is:
 
 The generator should train on `generator_target.parse_graph`. The rest is diagnostics and traceability.
 
-When a training target is sanitized, `is_reference_only=true` nodes are kept only as relation endpoints.
-They are rewritten to `geometry_model="none"` and `renderable=false`, and `frame` / `geometry` / `atoms`
-are removed. This prevents a generator or renderer that iterates through nodes from rendering context-only
-geometry twice.
+When a training target is sanitized, nodes with `geometry_model="none"` are marked `renderable=false`.
+This includes `insert_object_group` and reference-only context nodes. `is_reference_only=true` nodes are
+also rewritten to `geometry_model="none"` and have `frame` / `geometry` / `atoms` removed. This prevents a
+generator or renderer that iterates through nodes from rendering grouping/context geometry twice.
 
 ## Construction Rules
 

@@ -346,6 +346,7 @@ skeleton_width_graph
 
 - `is_reference_only=true` 表示该节点不拥有任何 face，只是作为高层关系的上下文端点。
 - `renderable=false` 表示生成器和 renderer 不应把该节点当作几何目标生成或渲染。
+- 所有 `geometry_model="none"` 的节点默认应视为 `renderable=false`，包括 `insert_object_group` 等分组节点。
 - 这类节点可以继续被 `inserted_in`、`divides`、`adjacent_to` 等关系引用。
 - 训练目标中的 reference-only 节点不应包含 `frame`、`geometry` 或 `atoms`。
 - renderer / training target 构建时应只把 `renderable != false` 的节点作为几何生成目标。

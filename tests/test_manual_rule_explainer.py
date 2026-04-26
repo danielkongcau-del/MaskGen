@@ -298,6 +298,9 @@ class ManualRuleExplainerTests(unittest.TestCase):
         graph = target["parse_graph"]
         reference_nodes = [node for node in graph["nodes"] if node.get("is_reference_only")]
         self.assertTrue(reference_nodes)
+        group_nodes = [node for node in graph["nodes"] if node["role"] == "insert_object_group"]
+        self.assertTrue(group_nodes)
+        self.assertTrue(all(node["geometry_model"] == "none" and node["renderable"] is False for node in group_nodes))
         for node in reference_nodes:
             self.assertFalse(node["renderable"])
             self.assertEqual(node["geometry_model"], "none")
