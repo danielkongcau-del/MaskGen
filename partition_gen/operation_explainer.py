@@ -236,6 +236,7 @@ def build_operation_explanation_payload(
         auto_label_pair_prior_payload,
         role_spec_payload,
         require_explicit=bool(role_spec_payload and config.require_explicit_role_spec_for_label_pairs),
+        include_soft_rules=bool(config.include_soft_role_spec_rules),
     )
 
     patches = build_operation_patches(
@@ -366,6 +367,10 @@ def build_operation_explanation_payload(
         "role_spec_format": (role_spec_payload or {}).get("format"),
         "role_spec_name": (role_spec_payload or {}).get("name"),
         "role_spec_relation_count": int(len((role_spec_payload or {}).get("relations", []))),
+        "role_spec_semantics": "label_pair_prior_constraints" if role_spec_payload else None,
+        "include_soft_role_spec_rules": bool(config.include_soft_role_spec_rules),
+        "active_role_spec_relation_count": int(label_pair_prior_payload.get("role_spec", {}).get("active_relation_count", 0)),
+        "soft_role_spec_relation_count": int(label_pair_prior_payload.get("role_spec", {}).get("soft_relation_count", 0)),
         "require_explicit_role_spec_for_label_pairs": bool(config.require_explicit_role_spec_for_label_pairs),
         "selection_diagnostics": selection.diagnostics,
     }

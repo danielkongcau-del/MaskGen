@@ -18,8 +18,17 @@ from partition_gen.operation_role_spec import validate_role_spec
 class ManualRuleExplainerConfig:
     include_all_faces_of_support_labels: bool = False
     include_all_faces_of_divider_labels: bool = False
+    include_soft_rules: bool = False
+    split_support_by_connected_components: bool = True
+    split_divider_by_connected_components: bool = True
     min_shared_length: float = 0.0
     min_area_eps: float = 1e-8
+
+
+def _active_role_rules(role_spec_payload: Dict[str, object], config: ManualRuleExplainerConfig) -> List[Dict[str, object]]:
+    if config.include_soft_rules:
+        return list(role_spec_payload.get("relations", []))
+    return [rule for rule in role_spec_payload.get("relations", []) if bool(rule.get("hard", True))]
 
 
 def _faces_by_id(evidence_payload: Dict[str, object]) -> Dict[int, Dict[str, object]]:
@@ -100,21 +109,115 @@ def _shared_length_between_labels(
     return float(total)
 
 
-def _shared_arc_ids_for_labels(
-    subject_label: int,
-    object_label: int,
-    faces_by_id: Dict[int, Dict[str, object]],
+def _shared_arc_ids_between_face_sets(
+    left_face_ids: Iterable[int],
+    right_face_ids: Iterable[int],
     adjacency: Sequence[Dict[str, object]],
 ) -> List[int]:
+    left = {int(value) for value in left_face_ids}
+    right = {int(value) for value in right_face_ids}
     arc_ids = []
     for item in adjacency:
         face_ids = [int(value) for value in item.get("faces", [])]
         if len(face_ids) != 2:
             continue
-        labels = [int(faces_by_id[face_id].get("label", -1)) for face_id in face_ids if face_id in faces_by_id]
-        if sorted(labels) == sorted([int(subject_label), int(object_label)]):
+        a, b = face_ids
+        if (a in left and b in right) or (a in right and b in left):
             arc_ids.extend(int(value) for value in item.get("arc_ids", []))
     return sorted(set(arc_ids))
+
+
+def _shared_length_between_face_sets(
+    left_face_ids: Iterable[int],
+    right_face_ids: Iterable[int],
+    adjacency: Sequence[Dict[str, object]],
+) -> float:
+    left = {int(value) for value in left_face_ids}
+    right = {int(value) for value in right_face_ids}
+    total = 0.0
+    for item in adjacency:
+        face_ids = [int(value) for value in item.get("faces", [])]
+        if len(face_ids) != 2:
+            continue
+        a, b = face_ids
+        if (a in left and b in right) or (a in right and b in left):
+            total += float(item.get("shared_length", 0.0))
+    return float(total)
+
+
+def _component_face_groups(
+    face_ids: Iterable[int],
+    adjacency: Sequence[Dict[str, object]],
+    *,
+    split: bool,
+    min_shared_length: float,
+) -> List[List[int]]:
+    selected = sorted(set(int(value) for value in face_ids))
+    if not selected:
+        return []
+    if not split:
+        return [selected]
+
+    selected_set = set(selected)
+    neighbors: Dict[int, set[int]] = {face_id: set() for face_id in selected}
+    for item in adjacency:
+        if float(item.get("shared_length", 0.0)) < min_shared_length:
+            continue
+        pair = [int(value) for value in item.get("faces", [])]
+        if len(pair) != 2:
+            continue
+        a, b = pair
+        if a in selected_set and b in selected_set:
+            neighbors[a].add(b)
+            neighbors[b].add(a)
+
+    groups: List[List[int]] = []
+    seen: set[int] = set()
+    for seed in selected:
+        if seed in seen:
+            continue
+        stack = [seed]
+        seen.add(seed)
+        group = []
+        while stack:
+            current = stack.pop()
+            group.append(current)
+            for other in sorted(neighbors[current], reverse=True):
+                if other not in seen:
+                    seen.add(other)
+                    stack.append(other)
+        groups.append(sorted(group))
+    return sorted(groups, key=lambda group: (group[0], len(group)))
+
+
+def _node_info_face_ids(info: Dict[str, object]) -> set[int]:
+    return {int(value) for value in info.get("face_ids", [])}
+
+
+def _node_infos_intersecting(
+    infos: Sequence[Dict[str, object]],
+    face_ids: Iterable[int],
+) -> List[Dict[str, object]]:
+    targets = {int(value) for value in face_ids}
+    if not targets:
+        return list(infos)
+    output = [info for info in infos if _node_info_face_ids(info) & targets]
+    return output
+
+
+def _node_infos_touching(
+    left_infos: Sequence[Dict[str, object]],
+    right_infos: Sequence[Dict[str, object]],
+    adjacency: Sequence[Dict[str, object]],
+) -> List[Tuple[Dict[str, object], Dict[str, object]]]:
+    output = []
+    for left in left_infos:
+        left_face_ids = _node_info_face_ids(left)
+        for right in right_infos:
+            right_face_ids = _node_info_face_ids(right)
+            if _shared_length_between_face_sets(left_face_ids, right_face_ids, adjacency) > 0.0:
+                output.append((left, right))
+    return output
 
 
 def _union_geometry(face_ids: Iterable[int], faces_by_id: Dict[int, Dict[str, object]]):
@@ -226,7 +329,7 @@ def _insert_assignments(
     adjacency = _adjacency_records(evidence_payload)
     insert_rules = [
         (int(rule["subject_label"]), int(rule["object_label"]), int(index), rule)
-        for index, rule in enumerate(role_spec_payload.get("relations", []))
+        for index, rule in enumerate(_active_role_rules(role_spec_payload, config))
         if str(rule.get("relation")) == REL_INSERTED_IN
     ]
     assignments: Dict[Tuple[int, int], Dict[str, object]] = {}
@@ -292,7 +395,7 @@ def _collect_rule_faces(
             }
         )
 
-    for rule in role_spec_payload.get("relations", []):
+    for rule in _active_role_rules(role_spec_payload, config):
         relation = str(rule.get("relation"))
         subject_label = int(rule["subject_label"])
         object_label = int(rule["object_label"])
@@ -358,21 +461,6 @@ def _collect_rule_faces(
                     }
                 )
     return support_face_ids_by_label, divider_face_ids_by_label, parallel_face_ids_by_pair, relation_records
-
-
-def _relation_node_for_label(
-    label: int,
-    *,
-    preferred: str,
-    support_node_by_label: Dict[int, str],
-    divider_node_by_label: Dict[int, str],
-    insert_group_by_label: Dict[int, str],
-) -> str | None:
-    if preferred == "divider":
-        return divider_node_by_label.get(int(label)) or insert_group_by_label.get(int(label)) or support_node_by_label.get(int(label))
-    if preferred == "insert_group":
-        return insert_group_by_label.get(int(label)) or support_node_by_label.get(int(label)) or divider_node_by_label.get(int(label))
-    return support_node_by_label.get(int(label)) or insert_group_by_label.get(int(label)) or divider_node_by_label.get(int(label))
 
 
 def _make_reference_support_node(
@@ -492,177 +580,295 @@ def build_manual_rule_explanation_payload(
     nodes: List[Dict[str, object]] = []
     relations: List[Dict[str, object]] = []
     residuals: List[Dict[str, object]] = []
-    support_node_by_label: Dict[int, str] = {}
-    divider_node_by_label: Dict[int, str] = {}
-    insert_group_by_label: Dict[int, str] = {}
-    reference_support_node_by_label: Dict[int, str] = {}
+    support_node_infos_by_label: Dict[int, List[Dict[str, object]]] = {}
+    divider_node_infos_by_label: Dict[int, List[Dict[str, object]]] = {}
+    insert_group_infos_by_label: Dict[int, List[Dict[str, object]]] = {}
+    reference_support_node_infos_by_label: Dict[int, List[Dict[str, object]]] = {}
     owned_face_ids: set[int] = set()
     selected_explanations: List[Dict[str, object]] = []
 
-    for index, label in enumerate(sorted(support_face_ids_by_label)):
-        face_ids = sorted(support_face_ids_by_label[label])
-        arc_ids = []
-        for face_id in face_ids:
-            if face_id in faces_by_id:
-                arc_ids.extend(_face_arc_ids(faces_by_id[face_id]))
-        node_id = f"support_{index}"
-        node = _polygon_node(node_id, "support_region", label, face_ids, faces_by_id, arc_ids=arc_ids, config=config)
-        if node:
-            nodes.append(node)
-            support_node_by_label[label] = node_id
-            owned_face_ids.update(face_ids)
+    support_node_counter = 0
+    divider_node_counter = 0
+    support_component_count = 0
+    divider_component_count = 0
 
-    for index, label in enumerate(sorted(divider_face_ids_by_label)):
-        face_ids = sorted(divider_face_ids_by_label[label])
-        arc_ids = []
-        for face_id in face_ids:
-            if face_id in faces_by_id:
-                arc_ids.extend(_face_arc_ids(faces_by_id[face_id]))
-        node_id = f"divider_{index}"
-        node = _polygon_node(node_id, "divider_region", label, face_ids, faces_by_id, arc_ids=arc_ids, config=config)
-        if node:
-            nodes.append(node)
-            divider_node_by_label[label] = node_id
-            owned_face_ids.update(face_ids)
+    def add_node_info(
+        mapping: Dict[int, List[Dict[str, object]]],
+        label: int,
+        node_id: str,
+        face_ids: Sequence[int],
+        *,
+        role: str,
+        reference_only: bool = False,
+    ) -> None:
+        mapping.setdefault(int(label), []).append(
+            {
+                "id": str(node_id),
+                "label": int(label),
+                "role": str(role),
+                "face_ids": set(int(value) for value in face_ids),
+                "reference_only": bool(reference_only),
+            }
+        )
 
-    def ensure_support_node_for_label(label: int, fallback_face_ids: Sequence[int]) -> str | None:
+    for label in sorted(support_face_ids_by_label):
+        groups = _component_face_groups(
+            support_face_ids_by_label[label],
+            adjacency,
+            split=config.split_support_by_connected_components,
+            min_shared_length=config.min_shared_length,
+        )
+        support_component_count += len(groups)
+        for face_ids in groups:
+            arc_ids = []
+            for face_id in face_ids:
+                if face_id in faces_by_id:
+                    arc_ids.extend(_face_arc_ids(faces_by_id[face_id]))
+            node_id = f"support_{support_node_counter}"
+            support_node_counter += 1
+            node = _polygon_node(node_id, "support_region", label, face_ids, faces_by_id, arc_ids=arc_ids, config=config)
+            if node:
+                nodes.append(node)
+                add_node_info(support_node_infos_by_label, label, node_id, face_ids, role="support_region")
+                owned_face_ids.update(face_ids)
+
+    for label in sorted(divider_face_ids_by_label):
+        groups = _component_face_groups(
+            divider_face_ids_by_label[label],
+            adjacency,
+            split=config.split_divider_by_connected_components,
+            min_shared_length=config.min_shared_length,
+        )
+        divider_component_count += len(groups)
+        for face_ids in groups:
+            arc_ids = []
+            for face_id in face_ids:
+                if face_id in faces_by_id:
+                    arc_ids.extend(_face_arc_ids(faces_by_id[face_id]))
+            node_id = f"divider_{divider_node_counter}"
+            divider_node_counter += 1
+            node = _polygon_node(node_id, "divider_region", label, face_ids, faces_by_id, arc_ids=arc_ids, config=config)
+            if node:
+                nodes.append(node)
+                add_node_info(divider_node_infos_by_label, label, node_id, face_ids, role="divider_region")
+                owned_face_ids.update(face_ids)
+
+    def ensure_support_node_infos_for_label(label: int, fallback_face_ids: Sequence[int]) -> List[Dict[str, object]]:
         label = int(label)
-        if label in support_node_by_label:
-            return support_node_by_label[label]
-        if label in reference_support_node_by_label:
-            return reference_support_node_by_label[label]
+        existing = _node_infos_intersecting(support_node_infos_by_label.get(label, []), fallback_face_ids)
+        if existing:
+            return existing
+        existing_refs = _node_infos_intersecting(reference_support_node_infos_by_label.get(label, []), fallback_face_ids)
+        if existing_refs:
+            return existing_refs
         face_ids = sorted(set(raw_support_face_ids_by_label.get(label, set())) | set(int(value) for value in fallback_face_ids))
         if not face_ids:
-            return _relation_node_for_label(
+            return []
+        groups = _component_face_groups(
+            face_ids,
+            adjacency,
+            split=config.split_support_by_connected_components,
+            min_shared_length=config.min_shared_length,
+        )
+        fallback_set = {int(value) for value in fallback_face_ids}
+        created: List[Dict[str, object]] = []
+        for group in groups:
+            if fallback_set and not (set(group) & fallback_set):
+                continue
+            node_id = f"support_ref_{sum(len(items) for items in reference_support_node_infos_by_label.values())}"
+            node = _make_reference_support_node(node_id, label, group, faces_by_id, config=config)
+            if not node:
+                continue
+            nodes.append(node)
+            add_node_info(
+                reference_support_node_infos_by_label,
                 label,
-                preferred="support",
-                support_node_by_label=support_node_by_label,
-                divider_node_by_label=divider_node_by_label,
-                insert_group_by_label=insert_group_by_label,
+                node_id,
+                group,
+                role="support_region",
+                reference_only=True,
             )
-        node_id = f"support_ref_{len(reference_support_node_by_label)}"
-        node = _make_reference_support_node(node_id, label, face_ids, faces_by_id, config=config)
-        if not node:
-            return _relation_node_for_label(
-                label,
-                preferred="support",
-                support_node_by_label=support_node_by_label,
-                divider_node_by_label=divider_node_by_label,
-                insert_group_by_label=insert_group_by_label,
-            )
-        nodes.append(node)
-        reference_support_node_by_label[label] = node_id
-        return node_id
+            created.append(reference_support_node_infos_by_label[label][-1])
+        return created
+
+    def relation_endpoint_infos_for_label(label: int, preferred: str, fallback_face_ids: Sequence[int]) -> List[Dict[str, object]]:
+        label = int(label)
+        if preferred == "divider":
+            infos = _node_infos_intersecting(divider_node_infos_by_label.get(label, []), fallback_face_ids)
+            if infos:
+                return infos
+            infos = _node_infos_intersecting(insert_group_infos_by_label.get(label, []), fallback_face_ids)
+            if infos:
+                return infos
+            infos = _node_infos_intersecting(support_node_infos_by_label.get(label, []), fallback_face_ids)
+            if infos:
+                return infos
+            return ensure_support_node_infos_for_label(label, fallback_face_ids)
+        if preferred == "insert_group":
+            infos = _node_infos_intersecting(insert_group_infos_by_label.get(label, []), fallback_face_ids)
+            if infos:
+                return infos
+            infos = _node_infos_intersecting(support_node_infos_by_label.get(label, []), fallback_face_ids)
+            if infos:
+                return infos
+            infos = _node_infos_intersecting(divider_node_infos_by_label.get(label, []), fallback_face_ids)
+            if infos:
+                return infos
+            return ensure_support_node_infos_for_label(label, fallback_face_ids)
+
+        infos = _node_infos_intersecting(support_node_infos_by_label.get(label, []), fallback_face_ids)
+        if infos:
+            return infos
+        infos = _node_infos_intersecting(insert_group_infos_by_label.get(label, []), fallback_face_ids)
+        if infos:
+            return infos
+        infos = _node_infos_intersecting(divider_node_infos_by_label.get(label, []), fallback_face_ids)
+        if infos:
+            return infos
+        return ensure_support_node_infos_for_label(label, fallback_face_ids)
+
+    def best_support_info_for_face(face_id: int, support_infos: Sequence[Dict[str, object]]) -> Dict[str, object] | None:
+        if not support_infos:
+            return None
+        scored = []
+        for info in support_infos:
+            shared_length = _shared_length_between_face_sets([face_id], _node_info_face_ids(info), adjacency)
+            scored.append((shared_length, -min(_node_info_face_ids(info) or {0}), info))
+        return max(scored, key=lambda item: item[:2])[2]
 
     insert_records = [record for record in relation_records if record["relation_type"] == REL_INSERTED_IN]
     insert_node_counter = 0
-    for group_index, record in enumerate(sorted(insert_records, key=lambda item: (item["object_label"], item["subject_label"]))):
+    insert_group_counter = 0
+    for record in sorted(insert_records, key=lambda item: (item["object_label"], item["subject_label"])):
         support_label = int(record["object_label"])
         insert_label = int(record["subject_label"])
-        support_node_id = ensure_support_node_for_label(support_label, record.get("support_face_ids", []))
-        if not support_node_id:
+        support_infos = ensure_support_node_infos_for_label(support_label, record.get("support_face_ids", []))
+        if not support_infos:
             continue
         insert_face_ids = [face_id for face_id in record["insert_face_ids"] if face_id in faces_by_id]
         if not insert_face_ids:
             continue
-        group_id = f"insert_group_{group_index}"
-        group_node = {
-            "id": group_id,
-            "role": "insert_object_group",
-            "label": insert_label,
-            "geometry_model": "none",
-            "support_id": support_node_id,
-            "children": [],
-            "count": int(len(insert_face_ids)),
-            "evidence": {
-                "face_ids": [],
-                "owned_face_ids": [],
-                "referenced_face_ids": sorted(insert_face_ids),
-                "arc_ids": [],
-            },
-        }
-        insert_group_by_label.setdefault(insert_label, group_id)
-        nodes.append(group_node)
-        relations.append(
-            {
-                "id": f"relation_{len(relations)}",
-                "type": "inserted_in",
-                "object": group_id,
-                "support": support_node_id,
-                "face_ids": sorted(insert_face_ids),
-                "rule_ids": list(record.get("rule_ids", [])),
-            }
-        )
-        for face_id in sorted(insert_face_ids, key=lambda value: (_face_centroid(faces_by_id[value])[1], _face_centroid(faces_by_id[value])[0], value)):
-            face = faces_by_id[face_id]
-            node_id = f"insert_{insert_node_counter}"
-            insert_node_counter += 1
-            node = _insert_node(node_id, face, arc_ids=_face_arc_ids(face), config=config)
-            if not node:
+        assigned_face_ids_by_support_id: Dict[str, List[int]] = {}
+        support_info_by_id = {str(info["id"]): info for info in support_infos}
+        for face_id in insert_face_ids:
+            support_info = best_support_info_for_face(face_id, support_infos)
+            if not support_info:
                 continue
-            node["parent_group"] = group_id
-            node["support_id"] = support_node_id
-            nodes.append(node)
-            group_node["children"].append(node_id)
-            owned_face_ids.add(face_id)
+            assigned_face_ids_by_support_id.setdefault(str(support_info["id"]), []).append(face_id)
+
+        for support_node_id in sorted(assigned_face_ids_by_support_id):
+            group_insert_face_ids = sorted(
+                assigned_face_ids_by_support_id[support_node_id],
+                key=lambda value: (_face_centroid(faces_by_id[value])[1], _face_centroid(faces_by_id[value])[0], value),
+            )
+            if not group_insert_face_ids:
+                continue
+            group_id = f"insert_group_{insert_group_counter}"
+            insert_group_counter += 1
+            group_node = {
+                "id": group_id,
+                "role": "insert_object_group",
+                "label": insert_label,
+                "geometry_model": "none",
+                "support_id": support_node_id,
+                "children": [],
+                "count": int(len(group_insert_face_ids)),
+                "evidence": {
+                    "face_ids": [],
+                    "owned_face_ids": [],
+                    "referenced_face_ids": sorted(group_insert_face_ids),
+                    "arc_ids": [],
+                },
+            }
+            add_node_info(
+                insert_group_infos_by_label,
+                insert_label,
+                group_id,
+                group_insert_face_ids,
+                role="insert_object_group",
+                reference_only=True,
+            )
+            nodes.append(group_node)
             relations.append(
                 {
                     "id": f"relation_{len(relations)}",
-                    "type": "contains",
-                    "parent": group_id,
-                    "child": node_id,
-                    "face_ids": [face_id],
+                    "type": "inserted_in",
+                    "object": group_id,
+                    "support": support_node_id,
+                    "face_ids": sorted(group_insert_face_ids),
+                    "rule_ids": list(record.get("rule_ids", [])),
+                }
+            )
+            for face_id in group_insert_face_ids:
+                face = faces_by_id[face_id]
+                node_id = f"insert_{insert_node_counter}"
+                insert_node_counter += 1
+                node = _insert_node(node_id, face, arc_ids=_face_arc_ids(face), config=config)
+                if not node:
+                    continue
+                node["parent_group"] = group_id
+                node["support_id"] = support_node_id
+                nodes.append(node)
+                group_node["children"].append(node_id)
+                owned_face_ids.add(face_id)
+                relations.append(
+                    {
+                        "id": f"relation_{len(relations)}",
+                        "type": "contains",
+                        "parent": group_id,
+                        "child": node_id,
+                        "face_ids": [face_id],
+                    }
+                )
+
+    for record in sorted([item for item in relation_records if item["relation_type"] == REL_DIVIDES], key=lambda item: (item["subject_label"], item["object_label"])):
+        divider_infos = relation_endpoint_infos_for_label(
+            int(record["subject_label"]),
+            "divider",
+            record.get("divider_face_ids", []),
+        )
+        support_infos = relation_endpoint_infos_for_label(
+            int(record["object_label"]),
+            "support",
+            record.get("support_face_ids", []),
+        )
+        if not divider_infos or not support_infos:
+            continue
+        for divider_info, support_info in _node_infos_touching(divider_infos, support_infos, adjacency):
+            divider_face_ids = sorted(_node_info_face_ids(divider_info))
+            support_face_ids = sorted(_node_info_face_ids(support_info))
+            arc_ids = _shared_arc_ids_between_face_sets(divider_face_ids, support_face_ids, adjacency)
+            relations.append(
+                {
+                    "id": f"relation_{len(relations)}",
+                    "type": "divides",
+                    "divider": divider_info["id"],
+                    "support": support_info["id"],
+                    "induced_face_ids": support_face_ids,
+                    "divider_face_ids": divider_face_ids,
+                    "arc_ids": arc_ids,
+                    "rule_ids": list(record.get("rule_ids", [])),
                 }
             )
 
-    for record in sorted([item for item in relation_records if item["relation_type"] == REL_DIVIDES], key=lambda item: (item["subject_label"], item["object_label"])):
-        divider_node_id = _relation_node_for_label(
-            int(record["subject_label"]),
-            preferred="divider",
-            support_node_by_label=support_node_by_label,
-            divider_node_by_label=divider_node_by_label,
-            insert_group_by_label=insert_group_by_label,
-        )
-        support_node_id = _relation_node_for_label(
-            int(record["object_label"]),
-            preferred="support",
-            support_node_by_label=support_node_by_label,
-            divider_node_by_label=divider_node_by_label,
-            insert_group_by_label=insert_group_by_label,
-        )
-        if not support_node_id:
-            support_node_id = ensure_support_node_for_label(int(record["object_label"]), record.get("support_face_ids", []))
-        if not divider_node_id or not support_node_id:
-            continue
-        arc_ids = _shared_arc_ids_for_labels(int(record["subject_label"]), int(record["object_label"]), faces_by_id, adjacency)
-        relations.append(
-            {
-                "id": f"relation_{len(relations)}",
-                "type": "divides",
-                "divider": divider_node_id,
-                "support": support_node_id,
-                "induced_face_ids": sorted(record["support_face_ids"]),
-                "divider_face_ids": sorted(record["divider_face_ids"]),
-                "arc_ids": arc_ids,
-                "rule_ids": list(record.get("rule_ids", [])),
-            }
-        )
-
     for record in sorted([item for item in relation_records if item["relation_type"] == REL_PARALLEL], key=lambda item: (item["subject_label"], item["object_label"])):
-        left_node_id = ensure_support_node_for_label(int(record["subject_label"]), record.get("left_face_ids", []))
-        right_node_id = ensure_support_node_for_label(int(record["object_label"]), record.get("right_face_ids", []))
-        if not left_node_id or not right_node_id:
+        left_infos = relation_endpoint_infos_for_label(int(record["subject_label"]), "support", record.get("left_face_ids", []))
+        right_infos = relation_endpoint_infos_for_label(int(record["object_label"]), "support", record.get("right_face_ids", []))
+        if not left_infos or not right_infos:
             continue
-        arc_ids = _shared_arc_ids_for_labels(int(record["subject_label"]), int(record["object_label"]), faces_by_id, adjacency)
-        relations.append(
-            {
-                "id": f"relation_{len(relations)}",
-                "type": "adjacent_to",
-                "faces": [left_node_id, right_node_id],
-                "arc_ids": arc_ids,
-                "rule_ids": list(record.get("rule_ids", [])),
-            }
-        )
+        for left_info, right_info in _node_infos_touching(left_infos, right_infos, adjacency):
+            left_face_ids = sorted(_node_info_face_ids(left_info))
+            right_face_ids = sorted(_node_info_face_ids(right_info))
+            arc_ids = _shared_arc_ids_between_face_sets(left_face_ids, right_face_ids, adjacency)
+            relations.append(
+                {
+                    "id": f"relation_{len(relations)}",
+                    "type": "adjacent_to",
+                    "faces": [left_info["id"], right_info["id"]],
+                    "arc_ids": arc_ids,
+                    "rule_ids": list(record.get("rule_ids", [])),
+                }
+            )
 
     all_face_ids = set(faces_by_id)
     residual_face_ids = sorted(all_face_ids - owned_face_ids, key=lambda value: (-_face_area(faces_by_id[value]), value))
@@ -759,6 +965,20 @@ def build_manual_rule_explanation_payload(
         "role_histogram": role_histogram,
         "role_spec_name": role_spec_payload.get("name"),
         "role_spec_relation_count": int(len(role_spec_payload.get("relations", []))),
+        "role_spec_semantics": "direct_parse_graph_rules",
+        "active_role_spec_relation_count": int(len(_active_role_rules(role_spec_payload, config))),
+        "soft_role_spec_relation_count": int(
+            sum(1 for rule in role_spec_payload.get("relations", []) if not bool(rule.get("hard", True)))
+        ),
+        "include_soft_rules": bool(config.include_soft_rules),
+        "split_support_by_connected_components": bool(config.split_support_by_connected_components),
+        "split_divider_by_connected_components": bool(config.split_divider_by_connected_components),
+        "support_component_count": int(support_component_count),
+        "divider_component_count": int(divider_component_count),
+        "support_node_count": int(sum(len(items) for items in support_node_infos_by_label.values())),
+        "divider_node_count": int(sum(len(items) for items in divider_node_infos_by_label.values())),
+        "insert_group_count": int(sum(len(items) for items in insert_group_infos_by_label.values())),
+        "reference_support_node_count": int(sum(len(items) for items in reference_support_node_infos_by_label.values())),
         "owned_face_count": int(len(owned_face_counts)),
         "referenced_face_count": int(len(referenced_face_ids_only)),
         "duplicate_owned_face_ids": duplicate_owned_face_ids,
@@ -783,7 +1003,11 @@ def build_manual_rule_explanation_payload(
         "role_spec": {
             "format": role_spec_payload.get("format"),
             "name": role_spec_payload.get("name"),
+            "semantics": "direct_parse_graph_rules",
             "relation_count": int(len(role_spec_payload.get("relations", []))),
+            "active_relation_count": int(len(_active_role_rules(role_spec_payload, config))),
+            "soft_relation_count": int(sum(1 for rule in role_spec_payload.get("relations", []) if not bool(rule.get("hard", True)))),
+            "include_soft_rules": bool(config.include_soft_rules),
             "defaults": role_spec_payload.get("defaults", {}),
         },
         "config": asdict(config),

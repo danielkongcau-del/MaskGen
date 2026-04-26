@@ -123,6 +123,8 @@ class ManualRuleExplainerTests(unittest.TestCase):
         )
         self.assertEqual(payload["format"], "maskgen_manual_rule_explanation_v1")
         self.assertEqual(payload["diagnostics"]["selection_method"], "manual_role_spec_direct")
+        self.assertEqual(payload["diagnostics"]["role_spec_semantics"], "direct_parse_graph_rules")
+        self.assertEqual(payload["role_spec"]["semantics"], "direct_parse_graph_rules")
         self.assertFalse(payload["diagnostics"]["uses_ortools"])
         graph = payload["generator_target"]["parse_graph"]
         roles = {node["role"] for node in graph["nodes"]}
@@ -187,6 +189,33 @@ class ManualRuleExplainerTests(unittest.TestCase):
         self.assertEqual(payload["diagnostics"]["residual_face_count"], 0)
         self.assertEqual(payload["diagnostics"]["duplicate_owned_face_count"], 0)
         self.assertTrue(payload["validation"]["all_faces_owned_exactly_once"])
+
+    def test_soft_rules_are_skipped_by_default(self) -> None:
+        left = _face(0, 0, [[0, 0], [10, 0], [10, 20], [0, 20]], degree=1)
+        right = _face(1, 6, [[10, 0], [20, 0], [20, 20], [10, 20]], degree=1)
+        payload = build_manual_rule_explanation_payload(
+            _evidence([left, right], [_adj(0, 1, 0, 6, 20.0)]),
+            _role_spec([{"subject_label": 0, "object_label": 6, "relation": "PARALLEL", "hard": False}]),
+        )
+        graph = payload["generator_target"]["parse_graph"]
+        self.assertEqual(payload["diagnostics"]["active_role_spec_relation_count"], 0)
+        self.assertEqual(payload["diagnostics"]["soft_role_spec_relation_count"], 1)
+        self.assertFalse(payload["diagnostics"]["include_soft_rules"])
+        self.assertEqual(payload["diagnostics"]["residual_face_count"], 2)
+        self.assertTrue(all(node["role"] == "residual_region" for node in graph["nodes"]))
+
+    def test_soft_rules_can_be_included_explicitly(self) -> None:
+        left = _face(0, 0, [[0, 0], [10, 0], [10, 20], [0, 20]], degree=1)
+        right = _face(1, 6, [[10, 0], [20, 0], [20, 20], [10, 20]], degree=1)
+        payload = build_manual_rule_explanation_payload(
+            _evidence([left, right], [_adj(0, 1, 0, 6, 20.0)]),
+            _role_spec([{"subject_label": 0, "object_label": 6, "relation": "PARALLEL", "hard": False}]),
+            config=ManualRuleExplainerConfig(include_soft_rules=True),
+        )
+        self.assertEqual(payload["diagnostics"]["active_role_spec_relation_count"], 1)
+        self.assertTrue(payload["diagnostics"]["include_soft_rules"])
+        self.assertEqual(payload["diagnostics"]["residual_face_count"], 0)
+        self.assertIn("adjacent_to", {relation["type"] for relation in payload["generator_target"]["parse_graph"]["relations"]})
 
     def test_insert_group_can_be_relation_endpoint(self) -> None:
         insert_a = [[4, 4], [6, 4], [6, 6], [4, 6]]
@@ -258,6 +287,92 @@ class ManualRuleExplainerTests(unittest.TestCase):
         self.assertEqual([node["role"] for node in graph["nodes"]], ["support_region"])
         self.assertEqual(payload["diagnostics"]["residual_face_count"], 0)
         self.assertEqual(payload["diagnostics"]["duplicate_owned_face_count"], 0)
+        self.assertTrue(payload["validation"]["all_faces_owned_exactly_once"])
+
+    def test_same_label_support_is_split_by_connected_component(self) -> None:
+        insert_a = [[4, 4], [6, 4], [6, 6], [4, 6]]
+        insert_b = [[24, 4], [26, 4], [26, 6], [24, 6]]
+        support_a = _face(0, 0, [[0, 0], [10, 0], [10, 10], [0, 10]], [insert_a], degree=1)
+        building_a = _face(1, 1, insert_a, degree=1)
+        support_b = _face(2, 0, [[20, 0], [30, 0], [30, 10], [20, 10]], [insert_b], degree=1)
+        building_b = _face(3, 1, insert_b, degree=1)
+        payload = build_manual_rule_explanation_payload(
+            _evidence(
+                [support_a, building_a, support_b, building_b],
+                [_adj(0, 1, 0, 1, 8.0), _adj(2, 3, 0, 1, 8.0)],
+            ),
+            _role_spec([{"subject_label": 1, "object_label": 0, "relation": "INSERTED_IN", "hard": True}]),
+        )
+        graph = payload["generator_target"]["parse_graph"]
+        support_nodes = [node for node in graph["nodes"] if node["role"] == "support_region" and not node.get("is_reference_only")]
+        insert_groups = [node for node in graph["nodes"] if node["role"] == "insert_object_group"]
+        self.assertEqual(len(support_nodes), 2)
+        self.assertEqual(len(insert_groups), 2)
+        self.assertTrue(all(len(node["evidence"]["owned_face_ids"]) == 1 for node in support_nodes))
+        self.assertEqual(payload["diagnostics"]["residual_face_count"], 0)
+        self.assertTrue(payload["validation"]["all_faces_owned_exactly_once"])
+
+    def test_same_label_divider_is_split_by_connected_component(self) -> None:
+        left_a = _face(0, 0, [[0, 0], [4, 0], [4, 10], [0, 10]], degree=1)
+        road_a = _face(1, 2, [[4, 0], [6, 0], [6, 10], [4, 10]], is_thin=True, degree=2)
+        right_a = _face(2, 0, [[6, 0], [10, 0], [10, 10], [6, 10]], degree=1)
+        left_b = _face(3, 0, [[20, 0], [24, 0], [24, 10], [20, 10]], degree=1)
+        road_b = _face(4, 2, [[24, 0], [26, 0], [26, 10], [24, 10]], is_thin=True, degree=2)
+        right_b = _face(5, 0, [[26, 0], [30, 0], [30, 10], [26, 10]], degree=1)
+        payload = build_manual_rule_explanation_payload(
+            _evidence(
+                [left_a, road_a, right_a, left_b, road_b, right_b],
+                [
+                    _adj(0, 1, 0, 2, 10.0),
+                    _adj(1, 2, 2, 0, 10.0),
+                    _adj(3, 4, 0, 2, 10.0),
+                    _adj(4, 5, 2, 0, 10.0),
+                ],
+            ),
+            _role_spec([{"subject_label": 2, "object_label": 0, "relation": "DIVIDES", "hard": True}]),
+        )
+        graph = payload["generator_target"]["parse_graph"]
+        divider_nodes = [node for node in graph["nodes"] if node["role"] == "divider_region"]
+        divides = [relation for relation in graph["relations"] if relation["type"] == "divides"]
+        self.assertEqual(len(divider_nodes), 2)
+        self.assertTrue(all(len(node["evidence"]["owned_face_ids"]) == 1 for node in divider_nodes))
+        self.assertEqual(len(divides), 4)
+        self.assertEqual(payload["diagnostics"]["residual_face_count"], 0)
+        self.assertTrue(payload["validation"]["all_faces_owned_exactly_once"])
+
+    def test_divides_insert_label_uses_matching_local_insert_group(self) -> None:
+        plain_building = [[2, 2], [4, 2], [4, 4], [2, 4]]
+        field_building = [[22, 2], [24, 2], [24, 4], [22, 4]]
+        plain = _face(0, 0, [[0, 0], [10, 0], [10, 10], [0, 10]], [plain_building], degree=1)
+        building_in_plain = _face(1, 1, plain_building, degree=1)
+        field = _face(2, 6, [[20, 0], [30, 0], [30, 10], [20, 10]], [field_building], degree=2)
+        building_in_field = _face(3, 1, field_building, degree=2)
+        road = _face(4, 2, [[24, 2], [26, 2], [26, 4], [24, 4]], is_thin=True, degree=1)
+        payload = build_manual_rule_explanation_payload(
+            _evidence(
+                [plain, building_in_plain, field, building_in_field, road],
+                [
+                    _adj(0, 1, 0, 1, 8.0),
+                    _adj(2, 3, 6, 1, 8.0),
+                    _adj(3, 4, 1, 2, 2.0),
+                ],
+            ),
+            _role_spec(
+                [
+                    {"subject_label": 1, "object_label": 0, "relation": "INSERTED_IN", "hard": True},
+                    {"subject_label": 1, "object_label": 6, "relation": "INSERTED_IN", "hard": True},
+                    {"subject_label": 2, "object_label": 1, "relation": "DIVIDES", "hard": True},
+                ]
+            ),
+        )
+        graph = payload["generator_target"]["parse_graph"]
+        groups = {node["id"]: node for node in graph["nodes"] if node["role"] == "insert_object_group"}
+        self.assertEqual(len(groups), 2)
+        divides = [relation for relation in graph["relations"] if relation["type"] == "divides"]
+        self.assertEqual(len(divides), 1)
+        target_group = groups[divides[0]["support"]]
+        self.assertEqual(target_group["evidence"]["referenced_face_ids"], [3])
+        self.assertEqual(payload["diagnostics"]["residual_face_count"], 0)
         self.assertTrue(payload["validation"]["all_faces_owned_exactly_once"])
 
 

@@ -33,11 +33,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--disable-divide-by-region", action="store_true")
     parser.add_argument("--disable-parallel-supports", action="store_true")
     parser.add_argument("--disable-residual", action="store_true")
+    parser.add_argument("--operation-include-soft-role-spec-rules", action="store_true")
     fallback = parser.add_mutually_exclusive_group()
     fallback.add_argument("--allow-greedy-fallback", dest="allow_greedy_fallback", action="store_true", default=True)
     fallback.add_argument("--disable-greedy-fallback", dest="allow_greedy_fallback", action="store_false")
     parser.add_argument("--manual-include-all-faces-of-support-labels", action="store_true")
     parser.add_argument("--manual-include-all-faces-of-divider-labels", action="store_true")
+    parser.add_argument("--manual-include-soft-rules", action="store_true")
+    parser.add_argument("--manual-disable-support-component-split", action="store_true")
+    parser.add_argument("--manual-disable-divider-component-split", action="store_true")
     parser.add_argument("--manual-min-shared-length", type=float, default=0.0)
     return parser.parse_args()
 
@@ -66,6 +70,9 @@ def main() -> None:
             config=ManualRuleExplainerConfig(
                 include_all_faces_of_support_labels=args.manual_include_all_faces_of_support_labels,
                 include_all_faces_of_divider_labels=args.manual_include_all_faces_of_divider_labels,
+                include_soft_rules=args.manual_include_soft_rules,
+                split_support_by_connected_components=not args.manual_disable_support_component_split,
+                split_divider_by_connected_components=not args.manual_disable_divider_component_split,
                 min_shared_length=args.manual_min_shared_length,
             ),
             source_tag=str(args.evidence_json.as_posix()),
@@ -85,6 +92,7 @@ def main() -> None:
                 enable_parallel_supports=not args.disable_parallel_supports,
                 enable_residual=not args.disable_residual,
                 allow_greedy_fallback=args.allow_greedy_fallback,
+                include_soft_role_spec_rules=args.operation_include_soft_role_spec_rules,
             ),
             source_tag=str(args.evidence_json.as_posix()),
         )

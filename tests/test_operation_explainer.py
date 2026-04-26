@@ -595,6 +595,48 @@ class OperationExplainerTests(unittest.TestCase):
         self.assertEqual(selected["relation_type"], REL_DIVIDES)
         self.assertEqual(selected["source"], "explicit_role_spec")
         self.assertTrue(selected["hard"])
+        self.assertEqual(merged["role_spec"]["semantics"], "label_pair_prior_constraints")
+        self.assertFalse(merged["role_spec"]["include_soft_rules"])
+
+    def test_role_spec_soft_rules_are_skipped_by_default_for_operation_prior(self) -> None:
+        support = _face(0, 0, [[0, 0], [10, 0], [10, 10], [0, 10]], degree=1)
+        woodland = _face(1, 5, [[10, 0], [20, 0], [20, 10], [10, 10]], degree=1)
+        evidence = _evidence([support, woodland], [_adj(0, 1, 0, 5, 10.0)])
+        auto = build_label_pair_relation_priors(evidence, OperationExplainerConfig())
+        role_spec = {
+            "format": "maskgen_role_spec_v1",
+            "relations": [{"subject_label": 0, "object_label": 5, "relation": "PARALLEL", "hard": False}],
+        }
+        merged = apply_role_spec_to_label_pair_priors(auto, role_spec, require_explicit=True)
+        self.assertEqual(len(merged["pairs"]), 0)
+        self.assertEqual(merged["role_spec"]["active_relation_count"], 0)
+        self.assertEqual(merged["role_spec"]["soft_relation_count"], 1)
+
+    def test_role_spec_soft_rules_can_be_included_for_operation_prior(self) -> None:
+        support = _face(0, 0, [[0, 0], [10, 0], [10, 10], [0, 10]], degree=1)
+        woodland = _face(1, 5, [[10, 0], [20, 0], [20, 10], [10, 10]], degree=1)
+        evidence = _evidence([support, woodland], [_adj(0, 1, 0, 5, 10.0)])
+        auto = build_label_pair_relation_priors(evidence, OperationExplainerConfig())
+        role_spec = {
+            "format": "maskgen_role_spec_v1",
+            "relations": [{"subject_label": 0, "object_label": 5, "relation": "PARALLEL", "hard": False}],
+        }
+        merged = apply_role_spec_to_label_pair_priors(auto, role_spec, require_explicit=True, include_soft_rules=True)
+        self.assertEqual(len(merged["pairs"]), 1)
+        self.assertEqual(merged["pairs"][0]["selected"]["source"], "explicit_role_spec")
+        self.assertFalse(merged["pairs"][0]["selected"]["hard"])
+        self.assertTrue(merged["role_spec"]["include_soft_rules"])
+
+    def test_role_spec_rejects_duplicate_unordered_pairs(self) -> None:
+        role_spec = {
+            "format": "maskgen_role_spec_v1",
+            "relations": [
+                {"subject_label": 3, "object_label": 0, "relation": "INSERTED_IN", "hard": True},
+                {"subject_label": 0, "object_label": 3, "relation": "PARALLEL", "hard": False},
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "duplicates unordered label pair 0:3"):
+            validate_role_spec(role_spec)
 
     def test_role_spec_can_require_all_label_pairs_explicit(self) -> None:
         insert_ring = [[3, 3], [5, 3], [5, 5], [3, 5]]
@@ -628,7 +670,9 @@ class OperationExplainerTests(unittest.TestCase):
         )
         self.assertEqual(payload["diagnostics"]["role_spec_name"], "synthetic")
         self.assertEqual(payload["diagnostics"]["role_spec_relation_count"], 1)
+        self.assertEqual(payload["diagnostics"]["role_spec_semantics"], "label_pair_prior_constraints")
         self.assertEqual(payload["role_spec"]["relation_count"], 1)
+        self.assertEqual(payload["role_spec"]["semantics"], "label_pair_prior_constraints")
         self.assertIn("explicit_role_spec", payload["diagnostics"]["label_pair_relation_source_histogram"])
 
     def test_token_profile_selected_output(self) -> None:

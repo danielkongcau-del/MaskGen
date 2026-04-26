@@ -27,6 +27,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--include-all-faces-of-support-labels", action="store_true")
     parser.add_argument("--include-all-faces-of-divider-labels", action="store_true")
+    parser.add_argument("--include-soft-rules", action="store_true")
+    parser.add_argument("--disable-support-component-split", action="store_true")
+    parser.add_argument("--disable-divider-component-split", action="store_true")
     parser.add_argument("--min-shared-length", type=float, default=0.0)
     return parser.parse_args()
 
@@ -139,6 +142,17 @@ def _row_from_payload(
         "profile": diagnostics.get("profile"),
         "role_spec_name": diagnostics.get("role_spec_name"),
         "role_spec_relation_count": diagnostics.get("role_spec_relation_count"),
+        "active_role_spec_relation_count": diagnostics.get("active_role_spec_relation_count"),
+        "soft_role_spec_relation_count": diagnostics.get("soft_role_spec_relation_count"),
+        "include_soft_rules": diagnostics.get("include_soft_rules"),
+        "split_support_by_connected_components": diagnostics.get("split_support_by_connected_components"),
+        "split_divider_by_connected_components": diagnostics.get("split_divider_by_connected_components"),
+        "support_component_count": diagnostics.get("support_component_count"),
+        "divider_component_count": diagnostics.get("divider_component_count"),
+        "support_node_count": diagnostics.get("support_node_count"),
+        "divider_node_count": diagnostics.get("divider_node_count"),
+        "insert_group_count": diagnostics.get("insert_group_count"),
+        "reference_support_node_count": diagnostics.get("reference_support_node_count"),
         "face_count": diagnostics.get("face_count"),
         "node_count": diagnostics.get("node_count"),
         "relation_count": diagnostics.get("relation_count"),
@@ -217,6 +231,9 @@ def main() -> None:
     config = ManualRuleExplainerConfig(
         include_all_faces_of_support_labels=bool(args.include_all_faces_of_support_labels),
         include_all_faces_of_divider_labels=bool(args.include_all_faces_of_divider_labels),
+        include_soft_rules=bool(args.include_soft_rules),
+        split_support_by_connected_components=not bool(args.disable_support_component_split),
+        split_divider_by_connected_components=not bool(args.disable_divider_component_split),
         min_shared_length=float(args.min_shared_length),
     )
     rows = run_benchmark(

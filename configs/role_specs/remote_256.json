@@ -84,14 +84,6 @@
       "notes": "Woodland and plain/background are modeled as peer support regions when adjacent."
     },
     {
-      "id": "woodland_inserted_in_field",
-      "subject_label": 5,
-      "object_label": 6,
-      "relation": "INSERTED_IN",
-      "hard": true,
-      "notes": "Woodland patches can be inserted in fields when locally enclosed."
-    },
-    {
       "id": "road_divides_building",
       "subject_label": 2,
       "object_label": 1,
@@ -130,14 +122,6 @@
       "relation": "PARALLEL",
       "hard": true,
       "notes": "Plain/background and field are modeled as peer support regions when adjacent."
-    },
-    {
-      "id": "plain_parallel_large_water",
-      "subject_label": 0,
-      "object_label": 3,
-      "relation": "PARALLEL",
-      "hard": false,
-      "notes": "Large water regions may be peer regions with plain/background rather than inserted objects."
     },
     {
       "id": "field_parallel_woodland",

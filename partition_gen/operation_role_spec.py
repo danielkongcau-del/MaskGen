@@ -26,6 +26,7 @@ def load_role_spec(path: str | Path) -> Dict[str, object]:
 def validate_role_spec(payload: Dict[str, object]) -> None:
     if payload.get("format") != "maskgen_role_spec_v1":
         raise ValueError("role spec format must be maskgen_role_spec_v1")
+    seen_pairs: Dict[str, int] = {}
     for index, rule in enumerate(payload.get("relations", [])):
         if "subject_label" not in rule or "object_label" not in rule:
             raise ValueError(f"role spec relation {index} must include subject_label and object_label")
@@ -34,6 +35,20 @@ def validate_role_spec(payload: Dict[str, object]) -> None:
             raise ValueError(f"unsupported role spec relation {relation!r}; expected one of {sorted(SUPPORTED_RELATIONS)}")
         if int(rule["subject_label"]) == int(rule["object_label"]):
             raise ValueError(f"role spec relation {index} uses the same subject and object label")
+        key = pair_key(int(rule["subject_label"]), int(rule["object_label"]))
+        if key in seen_pairs:
+            previous = seen_pairs[key]
+            raise ValueError(
+                f"role spec relation {index} duplicates unordered label pair {key}; "
+                f"previous relation index is {previous}. Add explicit conditions before allowing multiple rules per pair."
+            )
+        seen_pairs[key] = index
+
+
+def active_role_spec_rules(role_spec_payload: Dict[str, object], *, include_soft_rules: bool = False) -> list[Dict[str, object]]:
+    if include_soft_rules:
+        return list(role_spec_payload.get("relations", []))
+    return [rule for rule in role_spec_payload.get("relations", []) if bool(rule.get("hard", True))]
 
 
 def _rule_selected(rule: Dict[str, object]) -> Dict[str, object]:
@@ -77,6 +92,7 @@ def apply_role_spec_to_label_pair_priors(
     role_spec_payload: Dict[str, object] | None,
     *,
     require_explicit: bool = False,
+    include_soft_rules: bool = False,
 ) -> Dict[str, object]:
     if not role_spec_payload:
         return label_pair_prior_payload
@@ -84,7 +100,8 @@ def apply_role_spec_to_label_pair_priors(
     output = deepcopy(label_pair_prior_payload)
     pairs_by_key = {pair.get("key") or pair_key(pair["labels"][0], pair["labels"][1]): pair for pair in output.get("pairs", [])}
     explicit_keys = []
-    for rule in role_spec_payload.get("relations", []):
+    active_rules = active_role_spec_rules(role_spec_payload, include_soft_rules=include_soft_rules)
+    for rule in active_rules:
         key = pair_key(int(rule["subject_label"]), int(rule["object_label"]))
         pair = pairs_by_key.setdefault(key, _empty_pair((int(rule["subject_label"]), int(rule["object_label"]))))
         pair["selected"] = _rule_selected(rule)
@@ -106,7 +123,11 @@ def apply_role_spec_to_label_pair_priors(
     output["role_spec"] = {
         "format": role_spec_payload.get("format"),
         "name": role_spec_payload.get("name"),
+        "semantics": "label_pair_prior_constraints",
         "relation_count": int(len(role_spec_payload.get("relations", []))),
+        "active_relation_count": int(len(active_rules)),
+        "soft_relation_count": int(sum(1 for rule in role_spec_payload.get("relations", []) if not bool(rule.get("hard", True)))),
+        "include_soft_rules": bool(include_soft_rules),
         "explicit_pair_keys": sorted(set(explicit_keys)),
         "require_explicit": bool(require_explicit),
         "defaults": role_spec_payload.get("defaults", {}),

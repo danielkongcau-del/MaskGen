@@ -71,6 +71,7 @@ class OperationExplainerConfig:
     enable_label_pair_consistency: bool = True
     hard_enforce_label_pair_consistency: bool = True
     require_explicit_role_spec_for_label_pairs: bool = True
+    include_soft_role_spec_rules: bool = False
     label_pair_hard_min_confidence: float = 0.5
     label_pair_min_divided_fragments: int = 2
     label_pair_insert_boundary_fraction: float = 0.35

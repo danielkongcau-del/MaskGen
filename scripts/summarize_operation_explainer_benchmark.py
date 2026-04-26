@@ -64,6 +64,7 @@ def summarize(rows: List[dict]) -> str:
     cost_profiles = sorted({str(row.get("cost_profile", "unknown")) for row in ok_rows})
     baseline_profiles = sorted({str(row.get("independent_baseline_profile", "unknown")) for row in ok_rows})
     evidence_ref_profiles = sorted({str(bool(row.get("token_encode_evidence_refs", False))) for row in ok_rows})
+    soft_role_spec_profiles = sorted({str(bool(row.get("include_soft_role_spec_rules", False))) for row in ok_rows})
     lines = [
         "# Operation Explainer Benchmark Summary",
         "",
@@ -78,6 +79,7 @@ def summarize(rows: List[dict]) -> str:
         f"- mean false_cover_ratio_max: {_mean(ok_rows, 'false_cover_ratio_max'):.6f}",
         f"- mean hard_false_cover_candidate_count: {_mean(ok_rows, 'hard_false_cover_candidate_count'):.3f}",
         f"- token_encode_evidence_refs values: {', '.join(evidence_ref_profiles) if evidence_ref_profiles else 'n/a'}",
+        f"- include_soft_role_spec_rules values: {', '.join(soft_role_spec_profiles) if soft_role_spec_profiles else 'n/a'}",
         "",
         "## Operation Histogram",
         "",
@@ -139,6 +141,23 @@ def summarize(rows: List[dict]) -> str:
                 f"- mean total_compression_gain: {_mean(profile_rows, 'total_compression_gain'):.3f}",
                 f"- mean false_cover_ratio_max: {_mean(profile_rows, 'false_cover_ratio_max'):.6f}",
                 f"- mean hard_false_cover_candidate_count: {_mean(profile_rows, 'hard_false_cover_candidate_count'):.3f}",
+                "```json",
+                json.dumps(_histogram(profile_rows, "operation_histogram"), indent=2, ensure_ascii=False),
+                "```",
+            ]
+        )
+    lines.extend(["", "## Soft Role Spec Rule Groups"])
+    for profile in soft_role_spec_profiles:
+        profile_rows = [row for row in ok_rows if str(bool(row.get("include_soft_role_spec_rules", False))) == profile]
+        lines.extend(
+            [
+                "",
+                f"### include_soft_role_spec_rules={profile}",
+                "",
+                f"- samples: {len(profile_rows)}",
+                f"- valid ratio: {_ratio(profile_rows, 'validation_is_valid'):.3f}",
+                f"- mean residual_area_ratio: {_mean(profile_rows, 'residual_area_ratio'):.6f}",
+                f"- mean total_compression_gain: {_mean(profile_rows, 'total_compression_gain'):.3f}",
                 "```json",
                 json.dumps(_histogram(profile_rows, "operation_histogram"), indent=2, ensure_ascii=False),
                 "```",

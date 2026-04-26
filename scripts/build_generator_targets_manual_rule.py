@@ -30,6 +30,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--only-training-usable", action="store_true")
     parser.add_argument("--include-all-faces-of-support-labels", action="store_true")
     parser.add_argument("--include-all-faces-of-divider-labels", action="store_true")
+    parser.add_argument("--include-soft-rules", action="store_true")
+    parser.add_argument("--disable-support-component-split", action="store_true")
+    parser.add_argument("--disable-divider-component-split", action="store_true")
     parser.add_argument("--min-shared-length", type=float, default=0.0)
     return parser.parse_args()
 
@@ -160,6 +163,9 @@ def main() -> None:
     config = ManualRuleExplainerConfig(
         include_all_faces_of_support_labels=bool(args.include_all_faces_of_support_labels),
         include_all_faces_of_divider_labels=bool(args.include_all_faces_of_divider_labels),
+        include_soft_rules=bool(args.include_soft_rules),
+        split_support_by_connected_components=not bool(args.disable_support_component_split),
+        split_divider_by_connected_components=not bool(args.disable_divider_component_split),
         min_shared_length=float(args.min_shared_length),
     )
     split_root = args.output_root / args.split

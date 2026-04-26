@@ -398,8 +398,30 @@ Supported relations:
 - `DIVIDES`: subject label divides or organizes object label.
 - `PARALLEL`: the two labels are adjacent support-like regions.
 
-Explicit rules override automatic label-pair priors. A hard explicit rule becomes a high-confidence
-consistency constraint. Candidates that contradict it are marked invalid.
+In operation mode, the role spec is not executed directly. Its semantics are:
+
+```text
+label_pair_prior_constraints
+```
+
+That means explicit rules override automatic label-pair priors and constrain candidate generation /
+candidate consistency. The final selected operations still come from operation candidates and the global
+selector. This is intentionally different from `manual_rule_explainer`, where the same JSON shape is used
+as direct parse-graph construction rules.
+
+By default, operation mode only uses rules with `hard=true` or missing `hard`. Rules with `hard=false`
+are documentation / future conditional priors unless explicitly enabled:
+
+```powershell
+conda run -n lmf python scripts/build_operation_explanation_single.py `
+  --evidence-json outputs/benchmarks/operation_evidence_val50/37.json `
+  --role-spec configs/role_specs/remote_256.json `
+  --operation-include-soft-role-spec-rules `
+  --output outputs/visualizations/operation_37_with_soft_priors.json
+```
+
+A hard explicit rule becomes a high-confidence consistency constraint. Candidates that contradict it are
+marked invalid.
 
 By default, once a role spec is provided, operation-level label-pair semantics are restricted to explicit
 rules only:

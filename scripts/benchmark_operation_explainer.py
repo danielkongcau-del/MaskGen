@@ -23,6 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split", type=str, default=None)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--role-spec", type=Path, default=None)
+    parser.add_argument("--include-soft-role-spec-rules", action="store_true")
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--ortools-time-limit-seconds", type=float, default=10.0)
     parser.add_argument("--max-patch-size", type=int, default=32)
@@ -127,6 +128,10 @@ def benchmark_one(
             "role_spec_path": str(role_spec_path.as_posix()) if role_spec_path else None,
             "role_spec_name": diagnostics.get("role_spec_name"),
             "role_spec_relation_count": diagnostics.get("role_spec_relation_count"),
+            "role_spec_semantics": diagnostics.get("role_spec_semantics"),
+            "active_role_spec_relation_count": diagnostics.get("active_role_spec_relation_count"),
+            "soft_role_spec_relation_count": diagnostics.get("soft_role_spec_relation_count"),
+            "include_soft_role_spec_rules": diagnostics.get("include_soft_role_spec_rules"),
             "require_explicit_role_spec_for_label_pairs": diagnostics.get("require_explicit_role_spec_for_label_pairs"),
             "role_histogram": diagnostics.get("role_histogram", {}),
             "residual_face_count": diagnostics.get("residual_face_count"),
@@ -161,6 +166,7 @@ def benchmark_one(
             "hard_enforce_label_pair_consistency": bool(config.hard_enforce_label_pair_consistency),
             "label_pair_hard_min_confidence": float(config.label_pair_hard_min_confidence),
             "role_spec_path": str(role_spec_path.as_posix()) if role_spec_path else None,
+            "include_soft_role_spec_rules": bool(config.include_soft_role_spec_rules),
             "error": str(exc),
             "validation_is_valid": False,
             "runtime_ms": (time.perf_counter() - started) * 1000.0,
@@ -210,6 +216,7 @@ def main() -> None:
         ortools_time_limit_seconds=args.ortools_time_limit_seconds,
         cost_profile=args.cost_profile,
         token_encode_evidence_refs=bool(args.token_encode_evidence_refs),
+        include_soft_role_spec_rules=bool(args.include_soft_role_spec_rules),
     )
     rows = run_benchmark(
         args.evidence_root,

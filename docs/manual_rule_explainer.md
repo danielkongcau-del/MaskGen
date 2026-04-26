@@ -4,6 +4,16 @@
 
 It is a parallel path to the operation-level MDL/OR-Tools explainer. It does not generate operation candidates, does not score compression gain, and does not call OR-Tools. The existing operation explainer remains available.
 
+In this module, role spec semantics are:
+
+```text
+direct_parse_graph_rules
+```
+
+This is intentionally different from operation mode, where the same JSON shape is interpreted as
+`label_pair_prior_constraints` for candidate generation and consistency checks. Use the manual path for
+deterministic generator targets; use operation mode for MDL/OR-Tools experiments.
+
 ## Input
 
 The builder takes:
@@ -16,6 +26,10 @@ The role spec is the only source of high-level semantic relations. Supported rel
 - `INSERTED_IN`
 - `DIVIDES`
 - `PARALLEL`
+
+By default, this builder only executes rules with `hard=true` or missing `hard`.
+Rules with `hard=false` are treated as documentation / future conditional rules and are skipped.
+They can be included explicitly with `include_soft_rules=True` or the CLI flag `--include-soft-rules`, but this is not the default training-target behavior.
 
 Unspecified label pairs are not promoted into high-level semantic relations by this module. Their faces fall back to residual unless they are referenced through another explicit rule.
 
@@ -50,22 +64,24 @@ The generator should train on `generator_target.parse_graph`. The rest is diagno
 
 `INSERTED_IN(subject_label, object_label)`:
 
-- Builds a `support_region` for matched object-label faces.
-- Builds an `insert_object_group` for the subject label.
+- Builds one or more `support_region` nodes for matched object-label faces.
+- By default, same-label support faces are split by adjacency-connected components, not globally unioned.
+- Builds one `insert_object_group` per support component that owns matched subject-label inserts.
 - Builds one `insert_object` per matched subject-label face.
 - Emits `inserted_in` and `contains` relations.
 - If an insert face matches multiple support labels, the support label with the largest shared boundary wins.
 
 `DIVIDES(subject_label, object_label)`:
 
-- Builds a `divider_region` for subject-label faces adjacent to object-label faces.
-- Builds a `support_region` for matched object-label faces.
-- Emits a `divides` relation.
+- Builds one or more `divider_region` nodes for subject-label faces adjacent to object-label faces.
+- By default, same-label divider faces are split by adjacency-connected components.
+- Builds component-level `support_region` nodes for matched object-label faces.
+- Emits one `divides` relation for each touching divider/support component pair.
 
 `PARALLEL(subject_label, object_label)`:
 
-- Builds `support_region` nodes for both matched labels.
-- Emits an `adjacent_to` relation.
+- Builds component-level `support_region` nodes for both matched labels.
+- Emits one `adjacent_to` relation for each touching component pair.
 
 Any face not referenced by an explicit rule becomes a `residual_region`.
 
@@ -78,6 +94,13 @@ The direct builder separates ownership from context:
 - `face_ids`: compatibility alias for owned faces on geometry nodes.
 
 Every evidence face must have exactly one owner. Insert groups do not own their child faces; they only reference them. This avoids the earlier ambiguity where the same building face could be owned by both `insert_object_group` and `insert_object`.
+
+Same-label geometry is not blindly unioned into a single global node. Support and divider labels are instantiated as adjacency-connected components by default. This keeps a `support_region` or `divider_region` spatially local, which is easier for the generator than a single node containing many distant `polygons_local` components. The old global-union behavior can be restored for diagnostics by disabling:
+
+```text
+split_support_by_connected_components
+split_divider_by_connected_components
+```
 
 When role rules conflict, the current fixed priority is:
 
@@ -108,7 +131,7 @@ C is inserted in B
 D divides the group of C objects
 ```
 
-The builder does not hard-code any dataset-specific chain. It follows the explicit role spec and resolves relation endpoints by label:
+The builder does not hard-code any dataset-specific chain. It follows the explicit role spec and resolves relation endpoints by label and local component:
 
 ```text
 DIVIDES subject:
@@ -118,7 +141,7 @@ DIVIDES object / PARALLEL side:
   support node -> insert group -> divider node
 ```
 
-Therefore if a label already has an `insert_object_group`, later rules can reference that group directly. For example, `DIVIDES(road, building)` can produce:
+Only touching component pairs receive relations. Therefore if a label already has multiple `insert_object_group` nodes, later rules reference the local group that actually touches the other endpoint. For example, `DIVIDES(road, building)` can produce:
 
 ```json
 {
@@ -166,6 +189,9 @@ Optional flags:
 
 - `--include-all-faces-of-support-labels`
 - `--include-all-faces-of-divider-labels`
+- `--include-soft-rules`
+- `--disable-support-component-split`
+- `--disable-divider-component-split`
 - `--min-shared-length`
 
 ## Current Limits
