@@ -31,6 +31,16 @@ def _vertex_count(polygon: Polygon, *, eps: float) -> int:
     return int(total)
 
 
+def _normalize_approx_geometry(geometry, original_geometry: Polygon) -> tuple[Polygon, str | None]:
+    if isinstance(geometry, Polygon):
+        if geometry.is_empty:
+            return Polygon(), None
+        return orient(geometry, sign=1.0), None
+    if geometry is not None and not geometry.is_empty:
+        return orient(original_geometry, sign=1.0), f"non_polygon_approx_geometry:{type(geometry).__name__}"
+    return Polygon(), "empty_approx_geometry"
+
+
 def approximate_face_from_partition_graph(
     graph_data: Dict[str, object],
     face_data: Dict[str, object],
@@ -45,8 +55,10 @@ def approximate_face_from_partition_graph(
         simplify_tolerance=config.simplify_tolerance,
         area_epsilon=config.area_epsilon,
     )
-    approx_geometry = primitives_union_geometry(base_payload["primitives"])
-    approx_geometry = orient(approx_geometry, sign=1.0) if isinstance(approx_geometry, Polygon) else approx_geometry
+    approx_geometry, approx_fallback_reason = _normalize_approx_geometry(
+        primitives_union_geometry(base_payload["primitives"]),
+        original_geometry,
+    )
 
     payload = {
         "face_id": int(face_data["id"]),
@@ -60,6 +72,7 @@ def approximate_face_from_partition_graph(
         "original_area": float(original_geometry.area),
         "approx_area": float(approx_geometry.area) if not approx_geometry.is_empty else 0.0,
         "approx_iou": float(base_payload["approx_iou"]),
+        "approx_fallback_reason": approx_fallback_reason,
         "original_vertex_count": int(_vertex_count(original_geometry, eps=config.trim_collinear_eps)),
         "approx_vertex_count": int(_vertex_count(approx_geometry, eps=config.trim_collinear_eps))
         if not approx_geometry.is_empty
