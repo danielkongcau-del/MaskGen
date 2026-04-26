@@ -1,0 +1,202 @@
+{
+  "format": "maskgen_role_spec_v1",
+  "name": "remote_256_default",
+  "label_names": {
+    "0": "plain",
+    "1": "building",
+    "2": "road",
+    "3": "water",
+    "4": "vegetation",
+    "5": "woodland",
+    "6": "field"
+  },
+  "relations": [
+    {
+      "id": "building_inserted_in_plain",
+      "subject_label": 1,
+      "object_label": 0,
+      "relation": "INSERTED_IN",
+      "hard": true,
+      "notes": "Buildings are modeled as objects inserted into plain/background regions."
+    },
+    {
+      "id": "road_divides_plain",
+      "subject_label": 2,
+      "object_label": 0,
+      "relation": "DIVIDES",
+      "hard": true,
+      "notes": "Roads are modeled as divider regions relative to plain/background fragments."
+    },
+    {
+      "id": "road_divides_field",
+      "subject_label": 2,
+      "object_label": 6,
+      "relation": "DIVIDES",
+      "hard": true,
+      "notes": "Roads can also organize or split field regions."
+    },
+    {
+      "id": "building_inserted_in_field",
+      "subject_label": 1,
+      "object_label": 6,
+      "relation": "INSERTED_IN",
+      "hard": true,
+      "notes": "Buildings surrounded by field regions should be inserted objects, not dividers."
+    },
+    {
+      "id": "water_inserted_in_plain",
+      "subject_label": 3,
+      "object_label": 0,
+      "relation": "INSERTED_IN",
+      "hard": true,
+      "notes": "Small water bodies are modeled as inserted objects in plain/background regions."
+    },
+    {
+      "id": "water_inserted_in_field",
+      "subject_label": 3,
+      "object_label": 6,
+      "relation": "INSERTED_IN",
+      "hard": true,
+      "notes": "Small water bodies can appear as inserted regions within fields."
+    },
+    {
+      "id": "plain_parallel_vegetation",
+      "subject_label": 0,
+      "object_label": 4,
+      "relation": "PARALLEL",
+      "hard": true,
+      "notes": "Vegetation and plain/background are modeled as peer support regions when adjacent."
+    },
+    {
+      "id": "vegetation_inserted_in_field",
+      "subject_label": 4,
+      "object_label": 6,
+      "relation": "INSERTED_IN",
+      "hard": true,
+      "notes": "Small vegetation patches can be inserted in fields."
+    },
+    {
+      "id": "plain_parallel_woodland",
+      "subject_label": 0,
+      "object_label": 5,
+      "relation": "PARALLEL",
+      "hard": true,
+      "notes": "Woodland and plain/background are modeled as peer support regions when adjacent."
+    },
+    {
+      "id": "woodland_inserted_in_field",
+      "subject_label": 5,
+      "object_label": 6,
+      "relation": "INSERTED_IN",
+      "hard": true,
+      "notes": "Woodland patches can be inserted in fields when locally enclosed."
+    },
+    {
+      "id": "road_divides_building",
+      "subject_label": 2,
+      "object_label": 1,
+      "relation": "DIVIDES",
+      "hard": true,
+      "notes": "Roads organize or separate building groups."
+    },
+    {
+      "id": "road_divides_water",
+      "subject_label": 2,
+      "object_label": 3,
+      "relation": "DIVIDES",
+      "hard": true,
+      "notes": "Roads can separate water regions when they form local barriers."
+    },
+    {
+      "id": "road_divides_vegetation",
+      "subject_label": 2,
+      "object_label": 4,
+      "relation": "DIVIDES",
+      "hard": true,
+      "notes": "Roads can split vegetation regions."
+    },
+    {
+      "id": "road_divides_woodland",
+      "subject_label": 2,
+      "object_label": 5,
+      "relation": "DIVIDES",
+      "hard": true,
+      "notes": "Roads can split woodland regions."
+    },
+    {
+      "id": "plain_parallel_field",
+      "subject_label": 0,
+      "object_label": 6,
+      "relation": "PARALLEL",
+      "hard": true,
+      "notes": "Plain/background and field are modeled as peer support regions when adjacent."
+    },
+    {
+      "id": "plain_parallel_large_water",
+      "subject_label": 0,
+      "object_label": 3,
+      "relation": "PARALLEL",
+      "hard": false,
+      "notes": "Large water regions may be peer regions with plain/background rather than inserted objects."
+    },
+    {
+      "id": "field_parallel_woodland",
+      "subject_label": 6,
+      "object_label": 5,
+      "relation": "PARALLEL",
+      "hard": false,
+      "notes": "Fields and woodland can be peer support regions when neither encloses the other."
+    },
+    {
+      "id": "water_parallel_vegetation",
+      "subject_label": 3,
+      "object_label": 4,
+      "relation": "PARALLEL",
+      "hard": true,
+      "notes": "Water and vegetation are modeled as peer regions when adjacent; neither is treated as an inserted object by default."
+    },
+    {
+      "id": "vegetation_parallel_woodland",
+      "subject_label": 4,
+      "object_label": 5,
+      "relation": "PARALLEL",
+      "hard": true,
+      "notes": "Vegetation and woodland are modeled as peer natural regions when adjacent."
+    },
+    {
+      "id": "water_parallel_woodland",
+      "subject_label": 3,
+      "object_label": 5,
+      "relation": "PARALLEL",
+      "hard": true,
+      "notes": "Water and woodland are modeled as peer natural regions when adjacent."
+    },
+    {
+      "id": "building_inserted_in_woodland",
+      "subject_label": 1,
+      "object_label": 5,
+      "relation": "INSERTED_IN",
+      "hard": true,
+      "notes": "Buildings touching woodland are modeled as inserted objects unless a more specific local rule is added later."
+    },
+    {
+      "id": "building_inserted_in_vegetation",
+      "subject_label": 1,
+      "object_label": 4,
+      "relation": "INSERTED_IN",
+      "hard": true,
+      "notes": "Buildings touching vegetation are modeled as inserted objects unless a more specific local rule is added later."
+    },
+    {
+      "id": "building_parallel_water",
+      "subject_label": 1,
+      "object_label": 3,
+      "relation": "PARALLEL",
+      "hard": false,
+      "notes": "Building-water contact is uncommon in the current benchmark; keep it as a soft peer relation instead of forcing insertion."
+    }
+  ],
+  "defaults": {
+    "unspecified_pair": "AUTO_OR_RESIDUAL"
+  }
+}

@@ -40,6 +40,14 @@ ROLE_COLORS = {
     "residual_region": "#7f7f7f",
 }
 
+ROLE_LABELS = {
+    "support_region": "support",
+    "divider_region": "divider",
+    "insert_object": "insert",
+    "insert_object_group": "insert group",
+    "residual_region": "residual",
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Visualize an operation-level explanation.")
@@ -148,6 +156,18 @@ def _face_color(label: int):
     return PALETTE[label % PALETTE.shape[0]] / 255.0
 
 
+def add_role_legend(ax, roles):
+    handles = []
+    labels = []
+    for role in sorted(set(roles)):
+        if role not in ROLE_COLORS:
+            continue
+        handles.append(patches.Patch(facecolor=ROLE_COLORS[role], edgecolor="black", alpha=0.45))
+        labels.append(ROLE_LABELS.get(role, role))
+    if handles:
+        ax.legend(handles, labels, loc="lower right", fontsize=6, framealpha=0.9)
+
+
 def main() -> None:
     args = parse_args()
     operation = load_json(args.operation_json)
@@ -173,22 +193,36 @@ def main() -> None:
     axes[1].set_title("B. Evidence shared arcs", fontsize=10)
 
     axes[2].imshow(np.full_like(rgb, 255))
-    for candidate in operation.get("candidate_summary", {}).get("top_candidates", [])[:12]:
-        face_ids = candidate.get("covered_face_ids", [])
-        color = "#2ca02c" if candidate.get("compression_gain", 0.0) > 0 else "#999999"
-        for face_id in face_ids:
-            face = face_by_id.get(int(face_id))
-            if not face:
-                continue
-            geometry = face["geometry"]
-            draw_polygon(axes[2], geometry["outer"], geometry["holes"], facecolor=color, edgecolor="black", linewidth=0.25, alpha=0.08)
-        if face_ids:
-            first = face_by_id.get(int(face_ids[0]))
-            if first:
-                centroid = first.get("features", {}).get("centroid")
-                if centroid:
-                    axes[2].text(centroid[0], centroid[1], str(candidate.get("operation_type", ""))[:3], fontsize=4, ha="center")
-    axes[2].set_title("C. Top operation candidates", fontsize=10)
+    if operation.get("format") == "maskgen_manual_rule_explanation_v1":
+        relation_colors = {
+            "INSERTED_IN": "#ffbf00",
+            "DIVIDES": "#17becf",
+            "PARALLEL": "#2ca02c",
+        }
+        for explanation in operation.get("selected_explanations", []):
+            relation_type = str(explanation.get("relation_type", ""))
+            color = relation_colors.get(relation_type, "#999999")
+            face_ids = []
+            for key in ("insert_face_ids", "support_face_ids", "divider_face_ids", "left_face_ids", "right_face_ids"):
+                face_ids.extend(int(value) for value in explanation.get(key, []))
+            for face_id in sorted(set(face_ids)):
+                face = face_by_id.get(int(face_id))
+                if not face:
+                    continue
+                geometry = face["geometry"]
+                draw_polygon(axes[2], geometry["outer"], geometry["holes"], facecolor=color, edgecolor="black", linewidth=0.25, alpha=0.12)
+        axes[2].set_title("C. Manual role-spec explanations", fontsize=10)
+    else:
+        for candidate in operation.get("candidate_summary", {}).get("top_candidates", [])[:12]:
+            face_ids = candidate.get("covered_face_ids", [])
+            color = "#2ca02c" if candidate.get("compression_gain", 0.0) > 0 else "#999999"
+            for face_id in face_ids:
+                face = face_by_id.get(int(face_id))
+                if not face:
+                    continue
+                geometry = face["geometry"]
+                draw_polygon(axes[2], geometry["outer"], geometry["holes"], facecolor=color, edgecolor="black", linewidth=0.25, alpha=0.08)
+        axes[2].set_title("C. Top operation candidates", fontsize=10)
 
     axes[3].imshow(np.full_like(rgb, 255))
     graph = operation.get("generator_target", {}).get("parse_graph", {})
@@ -197,6 +231,7 @@ def main() -> None:
         false_cover = item.get("cost", {}).get("breakdown", {}).get("false_cover", {})
         if float(false_cover.get("area", 0.0) or 0.0) > 0.0:
             false_cover_faces.update(int(value) for value in item.get("evidence", {}).get("face_ids", []))
+    drawn_roles = []
     for node in graph.get("nodes", []):
         role = str(node.get("role", ""))
         evidence_info = node.get("evidence", {})
@@ -209,17 +244,27 @@ def main() -> None:
             edgecolor = "red" if int(face_id) in false_cover_faces else "black"
             linewidth = 0.8 if int(face_id) in false_cover_faces else 0.35
             draw_polygon(axes[3], geometry["outer"], geometry["holes"], facecolor=color, edgecolor=edgecolor, linewidth=linewidth, alpha=0.35)
-            centroid = face.get("features", {}).get("centroid")
-            if centroid:
-                axes[3].text(centroid[0], centroid[1], role.replace("_region", "").replace("_object", "")[:3], fontsize=4, ha="center")
+            drawn_roles.append(role)
+    add_role_legend(axes[3], drawn_roles)
     diagnostics = operation.get("diagnostics", {})
-    axes[3].set_title(
-        "D. Selected operations\n"
-        f"ops={diagnostics.get('selected_operation_count')}, residual={diagnostics.get('residual_area_ratio', 0.0):.3f}, "
-        f"gain={diagnostics.get('total_compression_gain', 0.0):.1f}, false={diagnostics.get('false_cover_ratio_max', 0.0):.3f}\n"
-        f"{diagnostics.get('selection_method')}, optimal={diagnostics.get('global_optimal')}",
-        fontsize=10,
-    )
+    if operation.get("format") == "maskgen_manual_rule_explanation_v1":
+        axes[3].set_title(
+            "D. Manual parse graph\n"
+            f"nodes={diagnostics.get('node_count')}, relations={diagnostics.get('relation_count')}, "
+            f"residual={diagnostics.get('residual_area_ratio', 0.0):.3f}, duplicate_owned={diagnostics.get('duplicate_owned_face_count', 0)}\n"
+            f"{diagnostics.get('selection_method')}, role_spec_rules={diagnostics.get('role_spec_relation_count')}",
+            fontsize=10,
+        )
+    else:
+        source_histogram = diagnostics.get("label_pair_relation_source_histogram", {})
+        explicit_rules = int(source_histogram.get("explicit_role_spec", 0) or 0)
+        axes[3].set_title(
+            "D. Selected operations\n"
+            f"ops={diagnostics.get('selected_operation_count')}, residual={diagnostics.get('residual_area_ratio', 0.0):.3f}, "
+            f"gain={diagnostics.get('total_compression_gain', 0.0):.1f}, false={diagnostics.get('false_cover_ratio_max', 0.0):.3f}\n"
+            f"{diagnostics.get('selection_method')}, optimal={diagnostics.get('global_optimal')}, explicit_rules={explicit_rules}",
+            fontsize=10,
+        )
 
     height, width = rgb.shape[:2]
     for axis in axes:

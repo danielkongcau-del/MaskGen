@@ -80,6 +80,70 @@ class ParseGraphTokenizerTest(unittest.TestCase):
         self.assertEqual(len(ids), len(tokens))
         self.assertNotIn(vocab["<UNK>"], ids)
 
+    def test_encode_manual_rule_parse_graph(self) -> None:
+        target = {
+            "format": "maskgen_generator_target_v1",
+            "target_type": "parse_graph",
+            "size": [256, 256],
+            "parse_graph": {
+                "nodes": [
+                    {
+                        "id": "support_0",
+                        "role": "support_region",
+                        "label": 0,
+                        "frame": {"origin": [128.0, 128.0], "scale": 128.0, "orientation": 0.0},
+                        "geometry_model": "polygon_code",
+                        "geometry": {
+                            "outer_local": [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]],
+                            "holes_local": [],
+                            "polygons_local": [
+                                {
+                                    "outer_local": [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]],
+                                    "holes_local": [],
+                                }
+                            ],
+                        },
+                    },
+                    {
+                        "id": "insert_group_0",
+                        "role": "insert_object_group",
+                        "label": 1,
+                        "geometry_model": "none",
+                        "support_id": "support_0",
+                        "children": ["insert_0"],
+                        "count": 1,
+                    },
+                    {
+                        "id": "insert_0",
+                        "role": "insert_object",
+                        "label": 1,
+                        "frame": {"origin": [128.0, 128.0], "scale": 16.0, "orientation": 0.0},
+                        "geometry_model": "polygon_code",
+                        "geometry": {
+                            "outer_local": [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]],
+                            "holes_local": [],
+                            "polygons_local": [],
+                        },
+                    },
+                ],
+                "relations": [
+                    {"id": "relation_0", "type": "inserted_in", "object": "insert_group_0", "support": "support_0"},
+                    {"id": "relation_1", "type": "contains", "parent": "insert_group_0", "child": "insert_0"},
+                ],
+                "residuals": [],
+            },
+            "metadata": {},
+        }
+        config = ParseGraphTokenizerConfig(coord_bins=32, area_bins=64, max_int=256)
+        vocab = build_token_vocabulary(config)
+        tokens = encode_generator_target(target, config=config)
+        ids = tokens_to_ids(tokens, vocab)
+        self.assertEqual(tokens[1], "MANUAL_PARSE_GRAPH_V1")
+        self.assertIn("ROLE_SUPPORT", tokens)
+        self.assertIn("ROLE_INSERT_GROUP", tokens)
+        self.assertIn("REL_INSERTED_IN", tokens)
+        self.assertNotIn(vocab["<UNK>"], ids)
+
 
 if __name__ == "__main__":
     unittest.main()

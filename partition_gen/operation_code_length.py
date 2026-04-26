@@ -324,7 +324,10 @@ def operation_code_length(
     relation_lengths = [relation_code_length(relation, config) for relation in candidate.relations]
     latent = latent_policy_code_length(candidate, config)
     residual = 0
-    exception = 0 if candidate.valid else int(config.token_exception)
+    consistency_exception = 0
+    if candidate.metadata:
+        consistency_exception = int(candidate.metadata.get("label_pair_consistency_exception", 0))
+    exception = (0 if candidate.valid else int(config.token_exception)) + consistency_exception
     total = (
         template
         + sum(int(item["total"]) for item in node_lengths)
@@ -350,5 +353,6 @@ def operation_code_length(
             "geometry": geometry_lengths,
             "relations": relation_lengths,
             "latent_policy": latent,
+            "label_pair_consistency_exception": int(consistency_exception),
         },
     }

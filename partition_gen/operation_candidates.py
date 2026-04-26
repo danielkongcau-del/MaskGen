@@ -10,7 +10,9 @@ from partition_gen.operation_geometry import (
     frame_from_geometry,
     polygon_from_face,
     polygon_to_local_payload,
+    union_face_polygons,
 )
+from partition_gen.operation_label_pair_prior import REL_DIVIDES, REL_INSERTED_IN, REL_PARALLEL, relation_for_labels
 from partition_gen.operation_types import (
     DIVIDE_BY_REGION,
     OVERLAY_INSERT,
@@ -49,6 +51,22 @@ def _adjacency_by_face(evidence_payload: Dict[str, object]) -> Dict[int, List[Di
 
 def _are_adjacent(left_id: int, right_id: int, adjacency_by_pair: Dict[Tuple[int, int], Dict[str, object]]) -> bool:
     return tuple(sorted((int(left_id), int(right_id)))) in adjacency_by_pair
+
+
+def _shared_length(left_id: int, right_id: int, adjacency_by_pair: Dict[Tuple[int, int], Dict[str, object]]) -> float:
+    adjacency = adjacency_by_pair.get(tuple(sorted((int(left_id), int(right_id)))))
+    if not adjacency:
+        return 0.0
+    return float(adjacency.get("shared_length", 0.0))
+
+
+def _support_boundary_fraction(support_id: int, insert: Dict[str, object], adjacency_by_pair: Dict[Tuple[int, int], Dict[str, object]]) -> float:
+    perimeter = float(insert.get("features", {}).get("perimeter", 0.0))
+    if perimeter <= 1e-8:
+        perimeter = polygon_from_face(insert).length
+    if perimeter <= 1e-8:
+        return 0.0
+    return float(_shared_length(support_id, int(insert["id"]), adjacency_by_pair) / perimeter)
 
 
 def _face_arc_ids(face: Dict[str, object]) -> List[int]:
@@ -191,12 +209,76 @@ def _candidate_label(faces: Sequence[Dict[str, object]]) -> int:
     return int(max(faces, key=lambda face: float(face.get("features", {}).get("area", 0.0))).get("label", -1))
 
 
+def _relation_matches(selected: Dict[str, object], expected_type: str, subject_label: int, object_label: int) -> bool:
+    if not selected:
+        return True
+    if selected.get("relation_type") == REL_PARALLEL and expected_type == REL_PARALLEL:
+        return True
+    return bool(
+        selected.get("relation_type") == expected_type
+        and int(selected.get("subject_label", -9999)) == int(subject_label)
+        and int(selected.get("object_label", -9999)) == int(object_label)
+    )
+
+
+def _label_pair_consistency_metadata(
+    *,
+    label_pair_prior_payload: Dict[str, object] | None,
+    config: OperationExplainerConfig,
+    expectations: Sequence[Tuple[int, int, str]],
+) -> Dict[str, object]:
+    if not config.enable_label_pair_consistency or not label_pair_prior_payload:
+        return {}
+    checks = []
+    inconsistent = False
+    hard_inconsistent = False
+    for subject_label, object_label, expected_type in expectations:
+        if int(subject_label) == int(object_label):
+            continue
+        selected = relation_for_labels(label_pair_prior_payload, int(subject_label), int(object_label))
+        if not selected:
+            continue
+        consistent = _relation_matches(selected, expected_type, int(subject_label), int(object_label))
+        inconsistent = inconsistent or not consistent
+        confidence = float(selected.get("confidence", 0.0) or 0.0)
+        hard_inconsistent = hard_inconsistent or (not consistent and confidence >= config.label_pair_hard_min_confidence)
+        checks.append(
+            {
+                "subject_label": int(subject_label),
+                "object_label": int(object_label),
+                "expected_relation_type": expected_type,
+                "selected_relation_type": selected.get("relation_type"),
+                "selected_subject_label": selected.get("subject_label"),
+                "selected_object_label": selected.get("object_label"),
+                "selected_relation": selected.get("relation"),
+                "selected_confidence": confidence,
+                "selected_source": selected.get("source", "auto_label_pair_prior"),
+                "selected_hard": bool(selected.get("hard", False)),
+                "consistent": bool(consistent),
+            }
+        )
+    if not checks:
+        return {}
+    return {
+        "label_pair_consistency": {
+            "checks": checks,
+            "consistent": bool(not inconsistent),
+            "hard_inconsistent": bool(hard_inconsistent),
+            "exception_tokens": int(config.token_label_pair_consistency_exception if inconsistent else 0),
+            "penalty": float(config.cost_label_pair_consistency_penalty if inconsistent else 0.0),
+        },
+        "label_pair_consistency_exception": int(config.token_label_pair_consistency_exception if inconsistent else 0),
+        "label_pair_consistency_penalty": float(config.cost_label_pair_consistency_penalty if inconsistent else 0.0),
+    }
+
+
 def _overlay_candidates(
     patch: OperationPatch,
     faces_by_id: Dict[int, Dict[str, object]],
     adjacency_by_pair: Dict[Tuple[int, int], Dict[str, object]],
     config: OperationExplainerConfig,
     start_index: int,
+    label_pair_prior_payload: Dict[str, object] | None,
 ) -> List[OperationCandidate]:
     if not config.enable_overlay_insert or len(patch.face_ids) < 2:
         return []
@@ -209,10 +291,11 @@ def _overlay_candidates(
             continue
         features = face.get("features", {})
         area = float(features.get("area", 0.0))
+        boundary_fraction = _support_boundary_fraction(int(support["id"]), face, adjacency_by_pair)
         if (
             area <= max(support_area * config.small_area_ratio, config.min_area_eps)
-            and not features.get("is_thin", False)
             and _are_adjacent(int(support["id"]), int(face["id"]), adjacency_by_pair)
+            and boundary_fraction >= config.min_insert_support_boundary_fraction
         ):
             inserts.append(face)
     if not inserts:
@@ -266,6 +349,18 @@ def _overlay_candidates(
             nodes[1]["children"].append(insert_node_id)
             relations.append({"type": "contains", "parent": group_node_id, "child": insert_node_id})
         covered = [int(support["id"]), *[int(face["id"]) for face in inserts]]
+        insert_labels = sorted({int(face.get("label", -1)) for face in inserts})
+        consistency = _label_pair_consistency_metadata(
+            label_pair_prior_payload=label_pair_prior_payload,
+            config=config,
+            expectations=[(insert_label, int(support.get("label", -1)), REL_INSERTED_IN) for insert_label in insert_labels],
+        )
+        metadata = {
+            "latent_geometry": latent,
+            "support_face_ids": [int(support["id"])],
+            "insert_face_ids": [int(face["id"]) for face in inserts],
+        }
+        metadata.update(consistency)
         candidates.append(
             _candidate(
                 candidate_id,
@@ -274,7 +369,7 @@ def _overlay_candidates(
                 covered,
                 nodes,
                 relations,
-                metadata={"latent_geometry": latent, "support_face_ids": [int(support["id"])], "insert_face_ids": [int(face["id"]) for face in inserts]},
+                metadata=metadata,
                 valid=bool(latent["valid"]),
                 failure_reason=latent["failure_reason"],
             )
@@ -288,6 +383,7 @@ def _divider_candidates(
     adjacency_by_face: Dict[int, List[Dict[str, object]]],
     config: OperationExplainerConfig,
     start_index: int,
+    label_pair_prior_payload: Dict[str, object] | None,
 ) -> List[OperationCandidate]:
     if not config.enable_divide_by_region or len(patch.face_ids) < 3:
         return []
@@ -298,36 +394,69 @@ def _divider_candidates(
     faces = [faces_by_id[face_id] for face_id in patch.face_ids if face_id in faces_by_id]
     if not faces:
         return []
-    divider = faces_by_id.get(patch.seed_face_id) if patch.seed_face_id in faces_by_id else None
-    if divider is None:
-        divider = max(
-            faces,
-            key=lambda face: (
-                float(face.get("features", {}).get("oriented_aspect_ratio", 0.0)),
-                int(face.get("features", {}).get("degree", 0)),
-            ),
-        )
-    divider_features = divider.get("features", {})
-    divider_degree = int(divider_features.get("degree", 0))
-    divider_aspect = float(divider_features.get("oriented_aspect_ratio", 0.0))
-    if not (divider_features.get("is_thin", False) or divider_degree >= config.min_divider_neighbor_count or divider_aspect >= config.thin_aspect_ratio):
-        return []
-    support_faces = [face for face in faces if int(face["id"]) != int(divider["id"])]
-    if len(support_faces) < 2:
-        return []
-    adjacent_support_faces = []
-    for face in support_faces:
-        for adjacency in adjacency_by_face.get(int(divider["id"]), []):
-            if int(face["id"]) in [int(value) for value in adjacency.get("faces", [])]:
-                adjacent_support_faces.append(face)
-                break
-    support_faces = adjacent_support_faces
+    divider_label = patch.metadata.get("divider_label")
+    support_label = patch.metadata.get("support_label")
+    if divider_label is not None and support_label is not None:
+        divider_faces = [face for face in faces if int(face.get("label", -1)) == int(divider_label)]
+        support_pool = [face for face in faces if int(face.get("label", -1)) == int(support_label)]
+        if patch.seed_face_id in faces_by_id and int(faces_by_id[int(patch.seed_face_id)].get("label", -1)) == int(divider_label):
+            seed = faces_by_id[int(patch.seed_face_id)]
+            divider_faces = [seed, *[face for face in divider_faces if int(face["id"]) != int(seed["id"])]]
+        if not divider_faces:
+            return []
+        divider_ids = {int(face["id"]) for face in divider_faces}
+        adjacent_support_faces = []
+        for face in support_pool:
+            for divider_id in divider_ids:
+                for adjacency in adjacency_by_face.get(divider_id, []):
+                    if int(face["id"]) in [int(value) for value in adjacency.get("faces", [])]:
+                        adjacent_support_faces.append(face)
+                        break
+                if adjacent_support_faces and int(adjacent_support_faces[-1]["id"]) == int(face["id"]):
+                    break
+        support_faces = list({int(face["id"]): face for face in adjacent_support_faces}.values())
+    else:
+        divider = faces_by_id.get(patch.seed_face_id) if patch.seed_face_id in faces_by_id else None
+        if divider is None:
+            divider = max(
+                faces,
+                key=lambda face: (
+                    float(face.get("features", {}).get("oriented_aspect_ratio", 0.0)),
+                    int(face.get("features", {}).get("degree", 0)),
+                ),
+            )
+        divider_features = divider.get("features", {})
+        divider_degree = int(divider_features.get("degree", 0))
+        divider_aspect = float(divider_features.get("oriented_aspect_ratio", 0.0))
+        if not (divider_degree >= config.min_divider_neighbor_count or divider_aspect >= config.thin_aspect_ratio * 1.5):
+            return []
+        divider_faces = [divider]
+        support_faces = [face for face in faces if int(face["id"]) != int(divider["id"])]
+        if len(support_faces) < 2:
+            return []
+        adjacent_support_faces = []
+        for face in support_faces:
+            for adjacency in adjacency_by_face.get(int(divider["id"]), []):
+                if int(face["id"]) in [int(value) for value in adjacency.get("faces", [])]:
+                    adjacent_support_faces.append(face)
+                    break
+        support_faces = adjacent_support_faces
     if len(support_faces) < config.min_divider_neighbor_count:
+        return []
+    label_counts: Dict[int, int] = {}
+    for face in support_faces:
+        label = int(face.get("label", -1))
+        label_counts[label] = int(label_counts.get(label, 0)) + 1
+    if max(label_counts.values() or [0]) < config.min_divider_same_label_neighbor_count:
         return []
     areas = [float(face.get("features", {}).get("area", 0.0)) for face in support_faces]
     if areas and max(areas) <= config.min_area_eps:
         return []
     if areas and sum(1 for area in areas if area >= max(areas) * 0.1) < config.min_divider_neighbor_count:
+        return []
+    divider_area = float(sum(float(face.get("features", {}).get("area", 0.0)) for face in divider_faces))
+    support_area_sum = float(sum(areas))
+    if support_area_sum <= config.min_area_eps or divider_area / support_area_sum > config.max_divider_to_support_area_ratio:
         return []
     label_diversity = len({int(face.get("label", -1)) for face in support_faces})
     label_diversity_penalty = (
@@ -335,26 +464,52 @@ def _divider_candidates(
     )
 
     candidates: List[OperationCandidate] = []
-    latent_candidates = build_latent_geometry_candidates(support_faces, [divider], DIVIDE_BY_REGION, config)
+    latent_candidates = build_latent_geometry_candidates(support_faces, divider_faces, DIVIDE_BY_REGION, config)
     for latent in latent_candidates[: config.max_candidates_per_patch]:
         candidate_id = f"cand_{start_index + len(candidates)}"
         support_node_id = f"{candidate_id}_support"
         divider_node_id = f"{candidate_id}_divider"
         arc_ids = patch.arc_ids
+        divider_face_ids = [int(face["id"]) for face in divider_faces]
+        support_face_ids = [int(face["id"]) for face in support_faces]
+        divider_label_value = _candidate_label(divider_faces)
+        divider_geometry = union_face_polygons(divider_faces)
+        divider_node = _polygon_node(
+            divider_node_id,
+            "divider_region",
+            divider_label_value,
+            divider_geometry,
+            evidence_face_ids=divider_face_ids,
+            evidence_arc_ids=arc_ids,
+            config=config,
+        )
         nodes = [
             _polygon_node(
                 support_node_id,
                 "support_region",
                 _candidate_label(support_faces),
                 latent["geometry"],
-                evidence_face_ids=[int(face["id"]) for face in support_faces],
+                evidence_face_ids=support_face_ids,
                 evidence_arc_ids=arc_ids,
                 config=config,
             ),
-            _face_polygon_node(divider_node_id, "divider_region", divider, evidence_arc_ids=arc_ids, config=config),
+            divider_node,
         ]
         relations = [{"type": "divides", "divider": divider_node_id, "support": support_node_id}]
-        covered = [int(divider["id"]), *[int(face["id"]) for face in support_faces]]
+        covered = [*divider_face_ids, *support_face_ids]
+        consistency = _label_pair_consistency_metadata(
+            label_pair_prior_payload=label_pair_prior_payload,
+            config=config,
+            expectations=[(divider_label_value, _candidate_label(support_faces), REL_DIVIDES)],
+        )
+        metadata = {
+            "latent_geometry": latent,
+            "divider_face_ids": divider_face_ids,
+            "support_face_ids": support_face_ids,
+            "support_label_diversity": int(label_diversity),
+            "support_label_diversity_penalty": float(label_diversity_penalty),
+        }
+        metadata.update(consistency)
         candidates.append(
             _candidate(
                 candidate_id,
@@ -363,13 +518,7 @@ def _divider_candidates(
                 covered,
                 nodes,
                 relations,
-                metadata={
-                    "latent_geometry": latent,
-                    "divider_face_ids": [int(divider["id"])],
-                    "support_face_ids": [int(face["id"]) for face in support_faces],
-                    "support_label_diversity": int(label_diversity),
-                    "support_label_diversity_penalty": float(label_diversity_penalty),
-                },
+                metadata=metadata,
                 valid=bool(latent["valid"]),
                 failure_reason=latent["failure_reason"],
             )
@@ -383,6 +532,7 @@ def _parallel_candidates(
     adjacency_by_pair: Dict[Tuple[int, int], Dict[str, object]],
     config: OperationExplainerConfig,
     start_index: int,
+    label_pair_prior_payload: Dict[str, object] | None,
 ) -> List[OperationCandidate]:
     if not config.enable_parallel_supports or len(patch.face_ids) < 2:
         return []
@@ -397,8 +547,6 @@ def _parallel_candidates(
     for key, adjacency in local_pairs[: max(1, config.max_candidates_per_patch // 4)]:
         left = faces_by_id[key[0]]
         right = faces_by_id[key[1]]
-        if left.get("features", {}).get("is_thin", False) or right.get("features", {}).get("is_thin", False):
-            continue
         left_area = float(left.get("features", {}).get("area", 0.0))
         right_area = float(right.get("features", {}).get("area", 0.0))
         if min(left_area, right_area) < max(left_area, right_area) * config.small_area_ratio:
@@ -412,6 +560,13 @@ def _parallel_candidates(
             _face_polygon_node(right_node_id, "support_region", right, evidence_arc_ids=arc_ids, config=config),
         ]
         relations = [{"type": "adjacent_to", "faces": [left_node_id, right_node_id], "arc_ids": list(arc_ids)}]
+        consistency = _label_pair_consistency_metadata(
+            label_pair_prior_payload=label_pair_prior_payload,
+            config=config,
+            expectations=[(int(left.get("label", -1)), int(right.get("label", -1)), REL_PARALLEL)],
+        )
+        metadata = {"support_face_ids": [int(left["id"]), int(right["id"])]}
+        metadata.update(consistency)
         candidates.append(
             _candidate(
                 candidate_id,
@@ -420,7 +575,7 @@ def _parallel_candidates(
                 [int(left["id"]), int(right["id"])],
                 nodes,
                 relations,
-                metadata={"support_face_ids": [int(left["id"]), int(right["id"])]},
+                metadata=metadata,
             )
         )
     return candidates
@@ -476,6 +631,7 @@ def propose_operation_candidates_with_diagnostics(
     role_prior_payload: Dict[str, object] | None,
     pairwise_prior_payload: Dict[str, object] | None,
     config: OperationExplainerConfig,
+    label_pair_prior_payload: Dict[str, object] | None = None,
 ) -> List[OperationCandidate]:
     del role_prior_payload, pairwise_prior_payload
     faces_by_id = _faces_by_id(evidence_payload)
@@ -485,9 +641,15 @@ def propose_operation_candidates_with_diagnostics(
     for patch in patches:
         start = len(candidates)
         patch_candidates: List[OperationCandidate] = []
-        patch_candidates.extend(_overlay_candidates(patch, faces_by_id, adjacency_by_pair, config, start + len(patch_candidates)))
-        patch_candidates.extend(_divider_candidates(patch, faces_by_id, adjacency_by_face, config, start + len(patch_candidates)))
-        patch_candidates.extend(_parallel_candidates(patch, faces_by_id, adjacency_by_pair, config, start + len(patch_candidates)))
+        patch_candidates.extend(
+            _overlay_candidates(patch, faces_by_id, adjacency_by_pair, config, start + len(patch_candidates), label_pair_prior_payload)
+        )
+        patch_candidates.extend(
+            _divider_candidates(patch, faces_by_id, adjacency_by_face, config, start + len(patch_candidates), label_pair_prior_payload)
+        )
+        patch_candidates.extend(
+            _parallel_candidates(patch, faces_by_id, adjacency_by_pair, config, start + len(patch_candidates), label_pair_prior_payload)
+        )
         candidates.extend(patch_candidates[: config.max_candidates_per_patch])
 
     if config.enable_residual:
@@ -516,6 +678,7 @@ def propose_operation_candidates(
     role_prior_payload: Dict[str, object] | None,
     pairwise_prior_payload: Dict[str, object] | None,
     config: OperationExplainerConfig,
+    label_pair_prior_payload: Dict[str, object] | None = None,
 ) -> List[OperationCandidate]:
     candidates, _ = propose_operation_candidates_with_diagnostics(
         evidence_payload,
@@ -523,5 +686,6 @@ def propose_operation_candidates(
         role_prior_payload,
         pairwise_prior_payload,
         config,
+        label_pair_prior_payload,
     )
     return candidates

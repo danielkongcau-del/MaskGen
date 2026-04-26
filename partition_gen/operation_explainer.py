@@ -6,8 +6,10 @@ from typing import Dict, List, Sequence, Tuple
 from partition_gen.explainer import ExplainerConfig, build_explanation_payload
 from partition_gen.operation_candidates import propose_operation_candidates_with_diagnostics
 from partition_gen.operation_costs import score_operation_candidates
+from partition_gen.operation_label_pair_prior import build_label_pair_relation_priors
 from partition_gen.operation_patches import build_operation_patches
 from partition_gen.operation_proxy_validation import validate_selected_operations_proxy
+from partition_gen.operation_role_spec import apply_role_spec_to_label_pair_priors
 from partition_gen.operation_selector import select_operations_with_ortools
 from partition_gen.operation_types import (
     RESIDUAL,
@@ -216,6 +218,7 @@ def build_operation_explanation_payload(
     weak_payload: Dict[str, object] | None = None,
     role_prior_payload: Dict[str, object] | None = None,
     pairwise_prior_payload: Dict[str, object] | None = None,
+    role_spec_payload: Dict[str, object] | None = None,
     config: OperationExplainerConfig | None = None,
     source_tag: str | None = None,
 ) -> Dict[str, object]:
@@ -228,14 +231,27 @@ def build_operation_explanation_payload(
         config=PairwiseRelationConfig(convex_backend="fallback_cdt_greedy"),
         source_tag=source_tag,
     )
+    auto_label_pair_prior_payload = build_label_pair_relation_priors(evidence_payload, config)
+    label_pair_prior_payload = apply_role_spec_to_label_pair_priors(
+        auto_label_pair_prior_payload,
+        role_spec_payload,
+        require_explicit=bool(role_spec_payload and config.require_explicit_role_spec_for_label_pairs),
+    )
 
-    patches = build_operation_patches(evidence_payload, role_prior_payload, pairwise_prior_payload, config)
+    patches = build_operation_patches(
+        evidence_payload,
+        role_prior_payload,
+        pairwise_prior_payload,
+        config,
+        label_pair_prior_payload=label_pair_prior_payload,
+    )
     candidates, candidate_generation_diagnostics = propose_operation_candidates_with_diagnostics(
         evidence_payload,
         patches,
         role_prior_payload,
         pairwise_prior_payload,
         config,
+        label_pair_prior_payload=label_pair_prior_payload,
     )
     candidates = score_operation_candidates(candidates, evidence_payload, config)
     selection = select_operations_with_ortools(candidates, _face_ids(evidence_payload), config)
@@ -344,6 +360,13 @@ def build_operation_explanation_payload(
         "weak_profile": weak_payload.get("explainer_profile"),
         "role_prior_profile": role_prior_payload.get("explainer_profile", "initial_face_role_prior"),
         "pairwise_prior_format": pairwise_prior_payload.get("format"),
+        "label_pair_prior_format": label_pair_prior_payload.get("format"),
+        "label_pair_relation_histogram": label_pair_prior_payload.get("relation_histogram", {}),
+        "label_pair_relation_source_histogram": label_pair_prior_payload.get("source_histogram", {}),
+        "role_spec_format": (role_spec_payload or {}).get("format"),
+        "role_spec_name": (role_spec_payload or {}).get("name"),
+        "role_spec_relation_count": int(len((role_spec_payload or {}).get("relations", []))),
+        "require_explicit_role_spec_for_label_pairs": bool(config.require_explicit_role_spec_for_label_pairs),
         "selection_diagnostics": selection.diagnostics,
     }
 
@@ -352,6 +375,8 @@ def build_operation_explanation_payload(
         "source_evidence": source_tag,
         "explainer_profile": "operation_level_mdl_v1",
         "selected_operations": selected_operations,
+        "label_pair_relation_priors": label_pair_prior_payload,
+        "role_spec": label_pair_prior_payload.get("role_spec", {}),
         "candidate_summary": candidate_summary,
         "generator_target": generator_target,
         "diagnostics": diagnostics,

@@ -331,3 +331,83 @@ token_relation_type
 + token_relation_endpoint * semantic_endpoint_count
 + token_evidence_reference * encoded_evidence_reference_count
 ```
+
+## 11. Label-Pair Consistency
+
+v1.2 adds an image-level label-pair prior before operation candidate selection. It is not a hard-coded
+label-to-role table. It is computed from the current evidence graph:
+
+- `A_INSERTED_IN_B`: A faces are mostly wrapped by B faces.
+- `A_DIVIDES_B`: at least one local A region touches multiple separated B fragments.
+- `PARALLEL`: the pair is adjacent, but neither insertion nor divider evidence is strong.
+
+This prior is used in two ways:
+
+- It creates additional label-pair patches, so a relation such as "road divides plain" can be proposed
+  even when single-face role priors are weak.
+- It checks candidate consistency. If a candidate contradicts a high-confidence label-pair relation,
+  the candidate is marked invalid. If the label-pair confidence is low, the candidate is not invalidated
+  but receives a small exception cost.
+
+The current implementation still keeps the v1 selection constraint:
+
+```text
+each face is covered by exactly one selected operation
+```
+
+So it still cannot fully express shared multi-operation references, for example one support region being
+divided by a road while also carrying inserted buildings. That requires a later dependency-graph model with
+`consumed_face_ids` and `referenced_face_ids`.
+
+## 12. Explicit Role Spec
+
+When automatic role inference is unstable, the operation explainer can load an explicit role specification:
+
+```powershell
+conda run -n lmf python scripts/build_operation_explanation_single.py `
+  --evidence-json outputs/benchmarks/operation_evidence_val50/37.json `
+  --role-spec configs/role_specs/remote_256.json `
+  --output outputs/visualizations/operation_37.json
+```
+
+The spec format is `maskgen_role_spec_v1`. It describes relative label-pair semantics, not absolute roles:
+
+```json
+{
+  "format": "maskgen_role_spec_v1",
+  "relations": [
+    {
+      "subject_label": 1,
+      "object_label": 0,
+      "relation": "INSERTED_IN",
+      "hard": true
+    },
+    {
+      "subject_label": 2,
+      "object_label": 0,
+      "relation": "DIVIDES",
+      "hard": true
+    }
+  ]
+}
+```
+
+Supported relations:
+
+- `INSERTED_IN`: subject label is inserted into object label.
+- `DIVIDES`: subject label divides or organizes object label.
+- `PARALLEL`: the two labels are adjacent support-like regions.
+
+Explicit rules override automatic label-pair priors. A hard explicit rule becomes a high-confidence
+consistency constraint. Candidates that contradict it are marked invalid.
+
+By default, once a role spec is provided, operation-level label-pair semantics are restricted to explicit
+rules only:
+
+```python
+OperationExplainerConfig(require_explicit_role_spec_for_label_pairs=True)
+```
+
+This means unspecified label pairs are not promoted into automatic `DIVIDES` / `INSERTED_IN` / `PARALLEL`
+priors. They can still be represented by residuals or low-level geometry, but they do not become high-level
+semantic operation constraints unless added to the spec.

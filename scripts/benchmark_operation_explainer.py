@@ -13,6 +13,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from partition_gen.operation_explainer import build_operation_explanation_payload  # noqa: E402
+from partition_gen.operation_role_spec import load_role_spec  # noqa: E402
 from partition_gen.operation_types import OperationExplainerConfig  # noqa: E402
 
 
@@ -21,6 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--evidence-root", type=Path, required=True)
     parser.add_argument("--split", type=str, default=None)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--role-spec", type=Path, default=None)
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--ortools-time-limit-seconds", type=float, default=10.0)
     parser.add_argument("--max-patch-size", type=int, default=32)
@@ -73,13 +75,25 @@ def _config_for_baseline_profile(config: OperationExplainerConfig, profile: str)
     )
 
 
-def benchmark_one(path: Path, config: OperationExplainerConfig, *, independent_baseline_profile: str = "both") -> dict | None:
+def benchmark_one(
+    path: Path,
+    config: OperationExplainerConfig,
+    *,
+    independent_baseline_profile: str = "both",
+    role_spec_payload: dict | None = None,
+    role_spec_path: Path | None = None,
+) -> dict | None:
     payload = load_json(path)
     if payload.get("format") != "maskgen_explanation_evidence_v1":
         return None
     started = time.perf_counter()
     try:
-        explanation = build_operation_explanation_payload(payload, config=config, source_tag=str(path.as_posix()))
+        explanation = build_operation_explanation_payload(
+            payload,
+            config=config,
+            role_spec_payload=role_spec_payload,
+            source_tag=str(path.as_posix()),
+        )
         runtime_ms = (time.perf_counter() - started) * 1000.0
         diagnostics = explanation["diagnostics"]
         validation = explanation["validation"]
@@ -95,6 +109,9 @@ def benchmark_one(path: Path, config: OperationExplainerConfig, *, independent_b
             "token_relation_type": int(config.token_relation_type),
             "token_label": int(config.token_label),
             "token_geometry_model": int(config.token_geometry_model),
+            "enable_label_pair_consistency": bool(config.enable_label_pair_consistency),
+            "hard_enforce_label_pair_consistency": bool(config.hard_enforce_label_pair_consistency),
+            "label_pair_hard_min_confidence": float(config.label_pair_hard_min_confidence),
             "face_count": diagnostics.get("face_count"),
             "patch_count": diagnostics.get("patch_count"),
             "candidate_count": diagnostics.get("candidate_count"),
@@ -105,6 +122,12 @@ def benchmark_one(path: Path, config: OperationExplainerConfig, *, independent_b
             "invalid_candidate_count": candidate_summary.get("invalid_candidate_count"),
             "selected_operation_count": diagnostics.get("selected_operation_count"),
             "operation_histogram": diagnostics.get("operation_histogram", {}),
+            "label_pair_relation_histogram": diagnostics.get("label_pair_relation_histogram", {}),
+            "label_pair_relation_source_histogram": diagnostics.get("label_pair_relation_source_histogram", {}),
+            "role_spec_path": str(role_spec_path.as_posix()) if role_spec_path else None,
+            "role_spec_name": diagnostics.get("role_spec_name"),
+            "role_spec_relation_count": diagnostics.get("role_spec_relation_count"),
+            "require_explicit_role_spec_for_label_pairs": diagnostics.get("require_explicit_role_spec_for_label_pairs"),
             "role_histogram": diagnostics.get("role_histogram", {}),
             "residual_face_count": diagnostics.get("residual_face_count"),
             "residual_area_ratio": diagnostics.get("residual_area_ratio"),
@@ -134,6 +157,10 @@ def benchmark_one(path: Path, config: OperationExplainerConfig, *, independent_b
             "token_relation_type": int(config.token_relation_type),
             "token_label": int(config.token_label),
             "token_geometry_model": int(config.token_geometry_model),
+            "enable_label_pair_consistency": bool(config.enable_label_pair_consistency),
+            "hard_enforce_label_pair_consistency": bool(config.hard_enforce_label_pair_consistency),
+            "label_pair_hard_min_confidence": float(config.label_pair_hard_min_confidence),
+            "role_spec_path": str(role_spec_path.as_posix()) if role_spec_path else None,
             "error": str(exc),
             "validation_is_valid": False,
             "runtime_ms": (time.perf_counter() - started) * 1000.0,
@@ -147,6 +174,8 @@ def run_benchmark(
     max_samples: int | None = None,
     config: OperationExplainerConfig,
     independent_baseline_profile: str = "both",
+    role_spec_payload: dict | None = None,
+    role_spec_path: Path | None = None,
 ) -> List[dict]:
     rows: List[dict] = []
     sample_count = 0
@@ -157,7 +186,13 @@ def run_benchmark(
             continue
         for profile in profiles:
             profiled_config = _config_for_baseline_profile(config, profile)
-            row = benchmark_one(path, profiled_config, independent_baseline_profile=profile)
+            row = benchmark_one(
+                path,
+                profiled_config,
+                independent_baseline_profile=profile,
+                role_spec_payload=role_spec_payload,
+                role_spec_path=role_spec_path,
+            )
             if row is not None:
                 rows.append(row)
         sample_count += 1
@@ -168,6 +203,7 @@ def run_benchmark(
 
 def main() -> None:
     args = parse_args()
+    role_spec = load_role_spec(args.role_spec) if args.role_spec else None
     config = OperationExplainerConfig(
         max_patch_size=args.max_patch_size,
         max_candidates_per_patch=args.max_candidates_per_patch,
@@ -181,6 +217,8 @@ def main() -> None:
         max_samples=args.max_samples,
         config=config,
         independent_baseline_profile=args.independent_baseline_profile,
+        role_spec_payload=role_spec,
+        role_spec_path=args.role_spec,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8") as handle:

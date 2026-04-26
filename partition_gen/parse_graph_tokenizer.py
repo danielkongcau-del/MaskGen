@@ -33,6 +33,35 @@ STATIC_TOKENS = [
     "RESIDUALS",
     "END_ATOM",
     "END_FACE",
+    "MANUAL_PARSE_GRAPH_V1",
+    "NODES",
+    "NODE",
+    "ROLE_SUPPORT",
+    "ROLE_DIVIDER",
+    "ROLE_INSERT",
+    "ROLE_INSERT_GROUP",
+    "ROLE_RESIDUAL",
+    "ROLE_UNKNOWN",
+    "GEOM_NONE",
+    "GEOM_POLYGON_CODE",
+    "GEOM_CONVEX_ATOMS",
+    "GEOM_UNKNOWN",
+    "REF_ONLY",
+    "POLYS",
+    "POLY",
+    "HOLES",
+    "HOLE",
+    "END_HOLE",
+    "END_POLY",
+    "END_NODE",
+    "RELATIONS",
+    "REL",
+    "REL_INSERTED_IN",
+    "REL_CONTAINS",
+    "REL_DIVIDES",
+    "REL_ADJACENT_TO",
+    "REL_UNKNOWN",
+    "END_REL",
 ]
 
 
@@ -178,6 +207,179 @@ def _adjacency_relations(relations: Sequence[dict]) -> List[dict]:
     )
 
 
+def _is_manual_parse_graph(nodes: Sequence[dict]) -> bool:
+    manual_roles = {
+        "support_region",
+        "divider_region",
+        "insert_object",
+        "insert_object_group",
+        "residual_region",
+    }
+    return any(str(node.get("role")) in manual_roles for node in nodes)
+
+
+def _manual_role_token(role: str) -> str:
+    role = str(role)
+    if role == "support_region":
+        return "ROLE_SUPPORT"
+    if role == "divider_region":
+        return "ROLE_DIVIDER"
+    if role == "insert_object":
+        return "ROLE_INSERT"
+    if role == "insert_object_group":
+        return "ROLE_INSERT_GROUP"
+    if role == "residual_region":
+        return "ROLE_RESIDUAL"
+    return "ROLE_UNKNOWN"
+
+
+def _manual_geometry_token(geometry_model: str) -> str:
+    geometry_model = str(geometry_model)
+    if geometry_model == "none":
+        return "GEOM_NONE"
+    if geometry_model == "polygon_code":
+        return "GEOM_POLYGON_CODE"
+    if geometry_model == "convex_atoms":
+        return "GEOM_CONVEX_ATOMS"
+    return "GEOM_UNKNOWN"
+
+
+def _manual_relation_token(relation_type: str) -> str:
+    relation_type = str(relation_type)
+    if relation_type == "inserted_in":
+        return "REL_INSERTED_IN"
+    if relation_type == "contains":
+        return "REL_CONTAINS"
+    if relation_type == "divides":
+        return "REL_DIVIDES"
+    if relation_type == "adjacent_to":
+        return "REL_ADJACENT_TO"
+    return "REL_UNKNOWN"
+
+
+def _encode_points(tokens: List[str], points: Sequence[Sequence[float]], *, config: ParseGraphTokenizerConfig) -> None:
+    tokens.extend(["PTS", int_token(len(points), config=config)])
+    for point in points:
+        tokens.extend(
+            [
+                q_token(float(point[0]), low=config.coord_min, high=config.coord_max, bins=config.coord_bins),
+                q_token(float(point[1]), low=config.coord_min, high=config.coord_max, bins=config.coord_bins),
+            ]
+        )
+
+
+def _encode_manual_polygon_geometry(tokens: List[str], geometry: dict, *, config: ParseGraphTokenizerConfig) -> None:
+    polygons = geometry.get("polygons_local")
+    if not polygons:
+        polygons = [{"outer_local": geometry.get("outer_local", []), "holes_local": geometry.get("holes_local", [])}]
+    tokens.extend(["POLYS", int_token(len(polygons), config=config)])
+    for polygon in polygons:
+        tokens.append("POLY")
+        _encode_points(tokens, polygon.get("outer_local", []), config=config)
+        holes = polygon.get("holes_local", []) or []
+        tokens.extend(["HOLES", int_token(len(holes), config=config)])
+        for hole in holes:
+            tokens.append("HOLE")
+            _encode_points(tokens, hole, config=config)
+            tokens.append("END_HOLE")
+        tokens.append("END_POLY")
+
+
+def _encode_manual_convex_atoms(tokens: List[str], atoms: Sequence[dict], *, config: ParseGraphTokenizerConfig) -> None:
+    tokens.extend(["ATOMS", int_token(len(atoms), config=config)])
+    for atom in atoms:
+        outer = atom.get("outer_local", [])
+        atom_type = str(atom.get("type", "convex"))
+        if atom_type == "triangle":
+            atom_type_token = "TYPE_TRIANGLE"
+        elif atom_type == "quad":
+            atom_type_token = "TYPE_QUAD"
+        else:
+            atom_type_token = "TYPE_CONVEX"
+        tokens.extend(
+            [
+                "ATOM",
+                atom_type_token,
+                "AREA",
+                q_token(float(atom.get("area", 0.0)), low=config.area_min, high=config.area_max, bins=config.area_bins),
+            ]
+        )
+        _encode_points(tokens, outer, config=config)
+        tokens.append("END_ATOM")
+
+
+def _manual_relation_endpoint_indices(relation: dict, node_index_by_id: Dict[str, int]) -> List[int]:
+    relation_type = str(relation.get("type"))
+    if relation_type == "inserted_in":
+        keys = ["object", "support"]
+        return [node_index_by_id[str(relation[key])] for key in keys if str(relation.get(key)) in node_index_by_id]
+    if relation_type == "contains":
+        keys = ["parent", "child"]
+        return [node_index_by_id[str(relation[key])] for key in keys if str(relation.get(key)) in node_index_by_id]
+    if relation_type == "divides":
+        keys = ["divider", "support"]
+        return [node_index_by_id[str(relation[key])] for key in keys if str(relation.get(key)) in node_index_by_id]
+    if relation_type == "adjacent_to":
+        return [node_index_by_id[str(node_id)] for node_id in relation.get("faces", []) if str(node_id) in node_index_by_id]
+    return []
+
+
+def _encode_manual_generator_target(
+    target: dict,
+    *,
+    config: ParseGraphTokenizerConfig,
+) -> List[str]:
+    graph = target.get("parse_graph", {})
+    nodes = list(graph.get("nodes", []))
+    relations = list(graph.get("relations", []))
+    size = target.get("size", [0, 0])
+    node_index_by_id = {str(node["id"]): index for index, node in enumerate(nodes)}
+
+    tokens: List[str] = ["<BOS>", "MANUAL_PARSE_GRAPH_V1", "SIZE"]
+    tokens.extend(int_token(int(value), config=config) for value in size[:2])
+    tokens.extend(["NODES", int_token(len(nodes), config=config)])
+    for node in nodes:
+        tokens.extend(
+            [
+                "NODE",
+                _manual_role_token(str(node.get("role", ""))),
+                "LABEL",
+                int_token(int(node.get("label", 0)), config=config),
+                "REF_ONLY",
+                int_token(1 if bool(node.get("is_reference_only", False)) else 0, config=config),
+                _manual_geometry_token(str(node.get("geometry_model", "none"))),
+            ]
+        )
+        role = str(node.get("role", ""))
+        if role == "insert_object_group":
+            tokens.extend(["COUNT", int_token(int(node.get("count", len(node.get("children", [])))), config=config)])
+        geometry_model = str(node.get("geometry_model", "none"))
+        if geometry_model == "polygon_code":
+            _encode_frame(tokens, node.get("frame", {}), config=config)
+            _encode_manual_polygon_geometry(tokens, node.get("geometry", {}), config=config)
+        elif geometry_model == "convex_atoms":
+            _encode_frame(tokens, node.get("frame", {}), config=config)
+            _encode_manual_convex_atoms(tokens, node.get("atoms", []), config=config)
+        tokens.append("END_NODE")
+
+    tokens.extend(["RELATIONS", int_token(len(relations), config=config)])
+    for relation in relations:
+        endpoint_indices = _manual_relation_endpoint_indices(relation, node_index_by_id)
+        tokens.extend(
+            [
+                "REL",
+                _manual_relation_token(str(relation.get("type", ""))),
+                "COUNT",
+                int_token(len(endpoint_indices), config=config),
+            ]
+        )
+        for index in endpoint_indices:
+            tokens.append(int_token(index, config=config))
+        tokens.append("END_REL")
+    tokens.extend(["RESIDUALS", int_token(len(graph.get("residuals", [])), config=config), "<EOS>"])
+    return tokens
+
+
 def _atom_type_token(atom: dict) -> str:
     atom_type = str(atom.get("geometry", {}).get("type", "convex"))
     if atom_type == "triangle":
@@ -211,6 +413,9 @@ def encode_generator_target(
     relations = list(graph.get("relations", []))
     nodes_by_id = {str(node["id"]): node for node in nodes}
     size = target.get("size", [0, 0])
+
+    if _is_manual_parse_graph(nodes):
+        return _encode_manual_generator_target(target, config=config)
 
     tokens: List[str] = ["<BOS>", "WEAK_PARSE_GRAPH_V1", "SIZE"]
     tokens.extend(int_token(int(value), config=config) for value in size[:2])

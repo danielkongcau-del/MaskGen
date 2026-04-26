@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Sequence, Set, Tuple
 
+from partition_gen.operation_label_pair_prior import REL_DIVIDES, REL_INSERTED_IN
 from partition_gen.operation_types import OperationExplainerConfig, OperationPatch
 
 
@@ -140,7 +141,7 @@ def _is_divider_like(face: Dict[str, object], role_prior_payload: Dict[str, obje
     features = face.get("features", {})
     aspect = float(features.get("oriented_aspect_ratio", 0.0))
     degree = int(features.get("degree", 0))
-    return bool(features.get("is_thin", False) or aspect >= config.thin_aspect_ratio or degree >= 3)
+    return bool(degree >= config.min_divider_neighbor_count or aspect >= config.thin_aspect_ratio * 1.5)
 
 
 def _is_support_like(face: Dict[str, object], median_area: float, role_prior_payload: Dict[str, object] | None) -> bool:
@@ -188,6 +189,7 @@ def build_operation_patches(
     role_prior_payload: Dict[str, object] | None,
     pairwise_prior_payload: Dict[str, object] | None,
     config: OperationExplainerConfig,
+    label_pair_prior_payload: Dict[str, object] | None = None,
 ) -> List[OperationPatch]:
     faces_by_id = _faces_by_id(evidence_payload)
     adjacency = _adjacency_by_face(evidence_payload)
@@ -237,7 +239,7 @@ def build_operation_patches(
                 neighbor = faces_by_id[neighbor_id]
                 features = neighbor.get("features", {})
                 neighbor_area = float(features.get("area", 0.0))
-                if neighbor_area <= max(support_area * config.small_area_ratio, median_area) and not features.get("is_thin", False):
+                if neighbor_area <= max(support_area * config.small_area_ratio, median_area):
                     compact_neighbors.append(neighbor_id)
             if compact_neighbors:
                 add_patch("support_centered", face_id, [face_id, *compact_neighbors], {"source": "area_compact_neighbor_prior"})
@@ -269,6 +271,71 @@ def build_operation_patches(
                 "pairwise_cost": pair.get("selected", {}).get("cost"),
             },
         )
+
+    if config.enable_label_pair_consistency and label_pair_prior_payload:
+        for pair in label_pair_prior_payload.get("pairs", []):
+            selected = pair.get("selected", {})
+            relation_type = selected.get("relation_type")
+            subject_label = selected.get("subject_label")
+            object_label = selected.get("object_label")
+            if subject_label is None or object_label is None:
+                continue
+            subject_label = int(subject_label)
+            object_label = int(object_label)
+            if relation_type == REL_DIVIDES:
+                for face in faces_by_id.values():
+                    face_id = int(face["id"])
+                    if int(face.get("label", -1)) != subject_label:
+                        continue
+                    neighbor_ids = sorted(_neighbors(face_id, adjacency))
+                    object_neighbors = [neighbor_id for neighbor_id in neighbor_ids if int(faces_by_id[neighbor_id].get("label", -1)) == object_label]
+                    if not object_neighbors:
+                        continue
+                    same_label_neighbors = [
+                        neighbor_id
+                        for neighbor_id in neighbor_ids
+                        if int(faces_by_id[neighbor_id].get("label", -1)) == subject_label
+                    ]
+                    expanded_object_neighbors = set(object_neighbors)
+                    for neighbor_id in same_label_neighbors:
+                        for second_hop in _neighbors(neighbor_id, adjacency):
+                            if int(faces_by_id[second_hop].get("label", -1)) == object_label:
+                                expanded_object_neighbors.add(second_hop)
+                    add_patch(
+                        "label_pair_divider",
+                        face_id,
+                        [face_id, *same_label_neighbors, *sorted(expanded_object_neighbors)],
+                        {
+                            "source": "label_pair_prior",
+                            "label_pair_relation": selected.get("relation"),
+                            "relation_type": relation_type,
+                            "divider_label": subject_label,
+                            "support_label": object_label,
+                            "relation_confidence": selected.get("confidence"),
+                        },
+                    )
+            elif relation_type == REL_INSERTED_IN:
+                for face in faces_by_id.values():
+                    face_id = int(face["id"])
+                    if int(face.get("label", -1)) != object_label:
+                        continue
+                    neighbor_ids = sorted(_neighbors(face_id, adjacency))
+                    insert_neighbors = [neighbor_id for neighbor_id in neighbor_ids if int(faces_by_id[neighbor_id].get("label", -1)) == subject_label]
+                    if not insert_neighbors:
+                        continue
+                    add_patch(
+                        "label_pair_insert",
+                        face_id,
+                        [face_id, *insert_neighbors],
+                        {
+                            "source": "label_pair_prior",
+                            "label_pair_relation": selected.get("relation"),
+                            "relation_type": relation_type,
+                            "support_label": object_label,
+                            "insert_label": subject_label,
+                            "relation_confidence": selected.get("confidence"),
+                        },
+                    )
 
     if not patches and faces_by_id:
         add_patch("fallback_global", None, sorted(faces_by_id), {"source": "fallback"})

@@ -153,7 +153,10 @@ def heuristic_operation_cost(candidate: OperationCandidate, config: OperationExp
     latent = candidate.metadata.get("latent_geometry", {}) if candidate.metadata else {}
     latent_extra = float(latent.get("extra_cost", 0.0)) if isinstance(latent, dict) else 0.0
     false_cover_cost = float(false_cover.get("cost", 0.0))
-    metadata_penalty = float(candidate.metadata.get("support_label_diversity_penalty", 0.0)) if candidate.metadata else 0.0
+    metadata_penalty = 0.0
+    if candidate.metadata:
+        metadata_penalty += float(candidate.metadata.get("support_label_diversity_penalty", 0.0))
+        metadata_penalty += float(candidate.metadata.get("label_pair_consistency_penalty", 0.0))
     residual = sum(float(item.get("area", 0.0)) * config.cost_residual_area for item in candidate.residuals)
     invalid = 0.0 if candidate.valid else config.invalid_cost
     total = template + node_object + geometry + relations + latent_extra + false_cover_cost + metadata_penalty + residual + invalid
@@ -180,6 +183,14 @@ def _geometry_validity(candidate: OperationCandidate, evidence_payload: Dict[str
             return False, f"missing_face:{face_id}"
     if candidate.operation_type == RESIDUAL:
         return True, None
+    if (
+        config.enable_label_pair_consistency
+        and config.hard_enforce_label_pair_consistency
+        and candidate.metadata
+        and isinstance(candidate.metadata.get("label_pair_consistency"), dict)
+        and bool(candidate.metadata["label_pair_consistency"].get("hard_inconsistent", False))
+    ):
+        return False, "label_pair_inconsistent"
     if not candidate.nodes:
         return False, "missing_nodes"
     if candidate.metadata:

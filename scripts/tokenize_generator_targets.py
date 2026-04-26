@@ -92,7 +92,9 @@ def main() -> None:
             ids = [] if args.no_token_ids else tokens_to_ids(tokens, vocab)
             sequence_row = {
                 "format": "maskgen_tokenized_parse_graph_v1",
-                "tokenizer": "weak_parse_graph_structured_v1",
+                "tokenizer": "manual_rule_parse_graph_structured_v1"
+                if len(tokens) > 1 and tokens[1] == "MANUAL_PARSE_GRAPH_V1"
+                else "weak_parse_graph_structured_v1",
                 "source_target": str(target_path.as_posix()),
                 "split": args.split,
                 "stem": row.get("stem"),

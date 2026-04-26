@@ -17,7 +17,9 @@ from partition_gen.operation_code_length import (
 )
 from partition_gen.operation_costs import score_operation_candidate
 from partition_gen.operation_explainer import build_operation_explanation_payload
+from partition_gen.operation_label_pair_prior import REL_DIVIDES, REL_INSERTED_IN, build_label_pair_relation_priors
 from partition_gen.operation_patches import build_operation_patches
+from partition_gen.operation_role_spec import apply_role_spec_to_label_pair_priors, validate_role_spec
 from partition_gen.operation_selector import select_operations_with_ortools
 from partition_gen.operation_types import (
     DIVIDE_BY_REGION,
@@ -252,6 +254,8 @@ class OperationExplainerTests(unittest.TestCase):
                 enable_convex_hull_fill=True,
                 false_cover_ratio_invalid=1.0,
                 hard_invalid_false_cover_ratio=1.0,
+                max_divider_to_support_area_ratio=10.0,
+                hard_enforce_label_pair_consistency=False,
             ),
         )
         divider_candidates = [item for item in payload["candidate_summary"]["top_candidates"] if item["operation_type"] == "DIVIDE_BY_REGION"]
@@ -419,6 +423,8 @@ class OperationExplainerTests(unittest.TestCase):
                 enable_union_with_divider=False,
                 enable_convex_hull_fill=True,
                 false_cover_ratio_invalid=0.01,
+                max_divider_to_support_area_ratio=10.0,
+                hard_enforce_label_pair_consistency=False,
             ),
         )
         self.assertIn("false_cover", payload["diagnostics"]["failure_reasons"])
@@ -523,6 +529,107 @@ class OperationExplainerTests(unittest.TestCase):
         selected_types = {item["operation_type"] for item in payload["selected_operations"]}
         self.assertEqual(selected_types, {"RESIDUAL"})
         self.assertTrue(all(float(item["cost"]["compression_gain"]) <= 0 for item in payload["selected_operations"]))
+
+    def test_label_pair_prior_detects_inserted_in_relation(self) -> None:
+        insert_rings = [
+            [[3, 3], [5, 3], [5, 5], [3, 5]],
+            [[8, 8], [10, 8], [10, 10], [8, 10]],
+            [[14, 14], [16, 14], [16, 16], [14, 16]],
+        ]
+        support = _face(0, 0, [[0, 0], [20, 0], [20, 20], [0, 20]], insert_rings, degree=3)
+        inserts = [_face(index + 1, 1, ring, degree=1) for index, ring in enumerate(insert_rings)]
+        evidence = _evidence([support, *inserts], [_adj(0, index + 1, 0, 1, 8.0) for index in range(len(inserts))])
+        priors = build_label_pair_relation_priors(evidence, OperationExplainerConfig())
+        selected = priors["pairs"][0]["selected"]
+        self.assertEqual(selected["relation_type"], REL_INSERTED_IN)
+        self.assertEqual(selected["subject_label"], 1)
+        self.assertEqual(selected["object_label"], 0)
+
+    def test_label_pair_prior_detects_divides_relation(self) -> None:
+        left = _face(0, 0, [[0, 0], [9, 0], [9, 20], [0, 20]], degree=1)
+        divider = _face(1, 2, [[9, 0], [11, 0], [11, 20], [9, 20]], is_thin=True, degree=2)
+        right = _face(2, 0, [[11, 0], [20, 0], [20, 20], [11, 20]], degree=1)
+        evidence = _evidence([left, divider, right], [_adj(0, 1, 0, 2, 20.0), _adj(1, 2, 2, 0, 20.0)])
+        priors = build_label_pair_relation_priors(evidence, OperationExplainerConfig())
+        selected = priors["pairs"][0]["selected"]
+        self.assertEqual(selected["relation_type"], REL_DIVIDES)
+        self.assertEqual(selected["subject_label"], 2)
+        self.assertEqual(selected["object_label"], 0)
+
+    def test_label_pair_consistency_exception_is_encoded(self) -> None:
+        allowed = _face(0, 0, [[0, 0], [2, 0], [2, 2], [0, 2]])
+        evidence = _evidence([allowed])
+        config = OperationExplainerConfig(cost_profile="token_length_v1")
+        candidate = OperationCandidate(
+            "c",
+            OVERLAY_INSERT,
+            "p",
+            (0,),
+            (),
+            [{"id": "support", "role": "support_region", "label": 0, "geometry_model": "none"}],
+            [],
+            [],
+            0.0,
+            0.0,
+            0.0,
+            {},
+            True,
+            metadata={"label_pair_consistency_exception": config.token_label_pair_consistency_exception},
+        )
+        scored = score_operation_candidate(candidate, evidence, config)
+        self.assertEqual(scored.cost_breakdown["operation"]["breakdown"]["label_pair_consistency_exception"], config.token_label_pair_consistency_exception)
+
+    def test_role_spec_overrides_auto_label_pair_prior(self) -> None:
+        insert_ring = [[3, 3], [5, 3], [5, 5], [3, 5]]
+        support = _face(0, 0, [[0, 0], [10, 0], [10, 10], [0, 10]], [insert_ring], degree=1)
+        insert = _face(1, 1, insert_ring, degree=1)
+        evidence = _evidence([support, insert], [_adj(0, 1, 0, 1, 8.0)])
+        auto = build_label_pair_relation_priors(evidence, OperationExplainerConfig())
+        role_spec = {
+            "format": "maskgen_role_spec_v1",
+            "relations": [{"subject_label": 1, "object_label": 0, "relation": "DIVIDES", "hard": True}],
+        }
+        validate_role_spec(role_spec)
+        merged = apply_role_spec_to_label_pair_priors(auto, role_spec)
+        selected = merged["pairs"][0]["selected"]
+        self.assertEqual(selected["relation_type"], REL_DIVIDES)
+        self.assertEqual(selected["source"], "explicit_role_spec")
+        self.assertTrue(selected["hard"])
+
+    def test_role_spec_can_require_all_label_pairs_explicit(self) -> None:
+        insert_ring = [[3, 3], [5, 3], [5, 5], [3, 5]]
+        support = _face(0, 0, [[0, 0], [10, 0], [10, 10], [0, 10]], [insert_ring], degree=1)
+        insert = _face(1, 1, insert_ring, degree=1)
+        water = _face(2, 3, [[10, 0], [12, 0], [12, 2], [10, 2]], degree=1)
+        evidence = _evidence([support, insert, water], [_adj(0, 1, 0, 1, 8.0), _adj(0, 2, 0, 3, 2.0)])
+        auto = build_label_pair_relation_priors(evidence, OperationExplainerConfig())
+        role_spec = {
+            "format": "maskgen_role_spec_v1",
+            "relations": [{"subject_label": 1, "object_label": 0, "relation": "INSERTED_IN", "hard": True}],
+        }
+        merged = apply_role_spec_to_label_pair_priors(auto, role_spec, require_explicit=True)
+        self.assertEqual(len(merged["pairs"]), 1)
+        self.assertEqual(merged["pairs"][0]["labels"], [0, 1])
+        self.assertTrue(merged["role_spec"]["require_explicit"])
+
+    def test_operation_explainer_accepts_explicit_role_spec(self) -> None:
+        insert_ring = [[3, 3], [5, 3], [5, 5], [3, 5]]
+        support = _face(0, 0, [[0, 0], [10, 0], [10, 10], [0, 10]], [insert_ring], degree=1)
+        insert = _face(1, 1, insert_ring, degree=1)
+        role_spec = {
+            "format": "maskgen_role_spec_v1",
+            "name": "synthetic",
+            "relations": [{"subject_label": 1, "object_label": 0, "relation": "INSERTED_IN", "hard": True}],
+        }
+        payload = build_operation_explanation_payload(
+            _evidence([support, insert], [_adj(0, 1, 0, 1, 8.0)]),
+            role_spec_payload=role_spec,
+            config=OperationExplainerConfig(cost_profile="token_length_v1"),
+        )
+        self.assertEqual(payload["diagnostics"]["role_spec_name"], "synthetic")
+        self.assertEqual(payload["diagnostics"]["role_spec_relation_count"], 1)
+        self.assertEqual(payload["role_spec"]["relation_count"], 1)
+        self.assertIn("explicit_role_spec", payload["diagnostics"]["label_pair_relation_source_histogram"])
 
     def test_token_profile_selected_output(self) -> None:
         face = _face(0, 1, [[0, 0], [10, 0], [10, 10], [0, 10]])
