@@ -254,6 +254,52 @@ def evaluate_topology_sample_rows(
     }
 
 
+def topology_structure_targets_from_summary(summary: dict) -> Dict[str, float | None]:
+    relation_mean = summary.get("relation_mean_per_valid_sample", {}) or {}
+    node_counts = summary.get("node_counts", {}) or {}
+    return {
+        "node_count_mean": node_counts.get("mean"),
+        "inserted_in_mean": relation_mean.get("REL_BLOCK_INSERTED_IN"),
+        "divides_mean": relation_mean.get("REL_BLOCK_DIVIDES"),
+        "adjacent_to_mean": relation_mean.get("REL_BLOCK_ADJACENT_TO"),
+    }
+
+
+def score_topology_structure(
+    summary: dict,
+    targets: Dict[str, float | None],
+    *,
+    epsilon: float = 1e-6,
+) -> Dict[str, object]:
+    """Score generated topology samples by validity and mean relative structure error.
+
+    Higher is better. A score of 1.0 means every sample is valid and the selected
+    structural means exactly match the targets.
+    """
+
+    actuals = topology_structure_targets_from_summary(summary)
+    relative_errors: Dict[str, float] = {}
+    for key, target in targets.items():
+        actual = actuals.get(key)
+        if actual is None or target is None:
+            continue
+        target_value = float(target)
+        if abs(target_value) <= float(epsilon):
+            continue
+        relative_errors[str(key)] = float(abs(float(actual) - target_value) / max(abs(target_value), float(epsilon)))
+    mean_relative_error = float(mean(relative_errors.values())) if relative_errors else None
+    valid_rate = float(summary.get("valid_rate", 0.0))
+    score = None if mean_relative_error is None else float(valid_rate - mean_relative_error)
+    return {
+        "score": score,
+        "valid_rate": valid_rate,
+        "mean_relative_error": mean_relative_error,
+        "metric_relative_errors": dict(sorted(relative_errors.items())),
+        "targets": dict(sorted(targets.items())),
+        "actuals": dict(sorted(actuals.items())),
+    }
+
+
 def sample_model_topology_rows(
     model,
     vocab: Dict[str, int],

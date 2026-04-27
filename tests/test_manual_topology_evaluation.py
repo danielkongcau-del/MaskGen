@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from partition_gen.manual_topology_evaluation import evaluate_topology_sample_rows, parse_topology_structure
+from partition_gen.manual_topology_evaluation import (
+    evaluate_topology_sample_rows,
+    parse_topology_structure,
+    score_topology_structure,
+    topology_structure_targets_from_summary,
+)
 from partition_gen.parse_graph_compact_tokenizer import encode_topology_target
 from partition_gen.parse_graph_tokenizer import ParseGraphTokenizerConfig
 
@@ -79,6 +84,18 @@ class ManualTopologyEvaluationTest(unittest.TestCase):
         self.assertEqual(summary["node_counts"]["mean"], 3.0)
         self.assertEqual(summary["relation_mean_per_valid_sample"]["REL_BLOCK_INSERTED_IN"], 1.0)
         self.assertTrue(summary["failure_reason_histogram"])
+
+    def test_score_topology_structure_penalizes_relative_distribution_error(self) -> None:
+        summary = evaluate_topology_sample_rows(
+            [{"sample_index": 0, "tokens": self.make_topology_tokens(), "length": len(self.make_topology_tokens())}]
+        )
+        exact_targets = topology_structure_targets_from_summary(summary)
+        exact_score = score_topology_structure(summary, exact_targets)
+        shifted_score = score_topology_structure(summary, {**exact_targets, "node_count_mean": 6.0})
+
+        self.assertEqual(exact_score["score"], 1.0)
+        self.assertLess(shifted_score["score"], exact_score["score"])
+        self.assertIn("node_count_mean", shifted_score["metric_relative_errors"])
 
 
 if __name__ == "__main__":

@@ -162,6 +162,10 @@ Trains the topology-only manual parse-graph AR Transformer on `manual_parse_grap
 
 It can optionally run sampling-based topology validation during eval intervals with `--topology-eval-samples`. When enabled, it writes `topology_eval_iter_<iter>.json`, logs compact topology metrics to `train_log.jsonl`, and saves `ckpt_best_topology_valid.pt` whenever unconstrained sampled valid rate improves.
 
+It also computes topology structure targets from the training token set, or from explicit `--topology-target-*`
+overrides, and saves `ckpt_best_topology_structure.pt` when the sampled valid rate plus structural-distribution
+score improves.
+
 ### `scripts/evaluate_manual_topology_ar.py`
 
 Samples a manual topology AR checkpoint and writes validity plus structural-distribution metrics.

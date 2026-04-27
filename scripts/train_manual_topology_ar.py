@@ -26,7 +26,12 @@ from partition_gen.manual_ar_training import (  # noqa: E402
     save_checkpoint,
     save_json,
 )
-from partition_gen.manual_topology_evaluation import evaluate_model_topology_samples  # noqa: E402
+from partition_gen.manual_topology_evaluation import (  # noqa: E402
+    evaluate_model_topology_samples,
+    evaluate_topology_sample_rows,
+    score_topology_structure,
+    topology_structure_targets_from_summary,
+)
 from partition_gen.manual_split_token_dataset import (  # noqa: E402
     ManualSplitTokenSequenceDataset,
     collate_manual_split_token_sequences,
@@ -67,6 +72,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--topology-eval-top-k", type=int, default=50)
     parser.add_argument("--topology-eval-top-k-invalid", type=int, default=20)
     parser.add_argument("--topology-eval-progress-every", type=int, default=10)
+    parser.add_argument("--topology-target-node-mean", type=float, default=None)
+    parser.add_argument("--topology-target-inserted-mean", type=float, default=None)
+    parser.add_argument("--topology-target-divides-mean", type=float, default=None)
+    parser.add_argument("--topology-target-adjacent-mean", type=float, default=None)
     parser.add_argument("--max-train-samples", type=int, default=None)
     parser.add_argument("--max-val-samples", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -108,6 +117,7 @@ def compact_topology_eval_metrics(summary: dict) -> dict:
     relation_mean = summary.get("relation_mean_per_valid_sample", {}) or {}
     node_counts = summary.get("node_counts", {}) or {}
     valid_lengths = summary.get("valid_lengths", {}) or {}
+    structure_score = summary.get("structure_score", {}) or {}
     return {
         "valid_rate": float(summary.get("valid_rate", 0.0)),
         "valid_count": int(summary.get("valid_count", 0)),
@@ -120,6 +130,33 @@ def compact_topology_eval_metrics(summary: dict) -> dict:
         "inserted_in_mean": relation_mean.get("REL_BLOCK_INSERTED_IN"),
         "divides_mean": relation_mean.get("REL_BLOCK_DIVIDES"),
         "adjacent_to_mean": relation_mean.get("REL_BLOCK_ADJACENT_TO"),
+        "structure_score": structure_score.get("score"),
+        "structure_mean_relative_error": structure_score.get("mean_relative_error"),
+    }
+
+
+def topology_structure_targets_from_args(args: argparse.Namespace, train_dataset: ManualSplitTokenSequenceDataset) -> dict:
+    train_summary = evaluate_topology_sample_rows(train_dataset.rows, top_k_invalid=0)
+    targets = topology_structure_targets_from_summary(train_summary)
+    overrides = {
+        "node_count_mean": args.topology_target_node_mean,
+        "inserted_in_mean": args.topology_target_inserted_mean,
+        "divides_mean": args.topology_target_divides_mean,
+        "adjacent_to_mean": args.topology_target_adjacent_mean,
+    }
+    for key, value in overrides.items():
+        if value is not None:
+            targets[key] = float(value)
+    return {
+        "source": "train_token_root",
+        "train_sample_count": int(len(train_dataset.rows)),
+        "targets": targets,
+        "train_summary": {
+            "valid_rate": train_summary["valid_rate"],
+            "node_counts": train_summary["node_counts"],
+            "relation_mean_per_valid_sample": train_summary["relation_mean_per_valid_sample"],
+        },
+        "overrides": {key: value for key, value in overrides.items() if value is not None},
     }
 
 
@@ -169,6 +206,7 @@ def main() -> None:
     iter_num = 0
     best_val_loss = float("inf")
     best_topology_valid_rate: float | None = None
+    best_topology_structure_score: float | None = None
     if args.resume is not None:
         checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
         model.load_state_dict(checkpoint["model"])
@@ -181,6 +219,9 @@ def main() -> None:
         checkpoint_best_topology = checkpoint.get("best_topology_valid_rate")
         if checkpoint_best_topology is not None:
             best_topology_valid_rate = float(checkpoint_best_topology)
+        checkpoint_best_structure = checkpoint.get("best_topology_structure_score")
+        if checkpoint_best_structure is not None:
+            best_topology_structure_score = float(checkpoint_best_structure)
 
     if args.compile:
         model = torch.compile(model)
@@ -190,7 +231,10 @@ def main() -> None:
     train_config["train_sample_count"] = int(len(train_dataset))
     train_config["val_sample_count"] = int(len(val_dataset))
     train_config["vocab_size"] = int(len(vocab))
+    topology_structure_target_payload = topology_structure_targets_from_args(args, train_dataset)
+    train_config["topology_structure_targets"] = topology_structure_target_payload["targets"]
     save_json(output_dir / "config.json", {"model_config": model_config.to_dict(), "train_config": train_config})
+    save_json(output_dir / "topology_structure_targets.json", topology_structure_target_payload)
 
     lr_decay_iters = int(args.lr_decay_iters or args.max_iters)
     train_iter = itertools.cycle(train_loader)
@@ -262,6 +306,10 @@ def main() -> None:
                 )
                 topology_eval_summary["iter"] = int(iter_num)
                 topology_eval_summary["val_loss"] = float(val_loss)
+                topology_eval_summary["structure_score"] = score_topology_structure(
+                    topology_eval_summary,
+                    topology_structure_target_payload["targets"],
+                )
                 save_json(output_dir / f"topology_eval_iter_{iter_num}.json", topology_eval_summary)
                 topology_eval_metrics = compact_topology_eval_metrics(topology_eval_summary)
                 append_jsonl(
@@ -272,7 +320,8 @@ def main() -> None:
                     "topology_eval "
                     f"iter={iter_num} valid_rate={topology_eval_metrics['valid_rate']:.4f} "
                     f"valid={topology_eval_metrics['valid_count']}/{topology_eval_metrics['sample_count']} "
-                    f"node_mean={topology_eval_metrics['node_count_mean']}"
+                    f"node_mean={topology_eval_metrics['node_count_mean']} "
+                    f"structure_score={topology_eval_metrics['structure_score']}"
                 )
 
             current_topology_valid_rate = (
@@ -284,6 +333,18 @@ def main() -> None:
                     current_topology_valid_rate
                     if best_topology_valid_rate is None
                     else max(best_topology_valid_rate, current_topology_valid_rate)
+                )
+            current_topology_structure_score = (
+                None
+                if topology_eval_metrics is None or topology_eval_metrics["structure_score"] is None
+                else float(topology_eval_metrics["structure_score"])
+            )
+            checkpoint_best_topology_structure_score = best_topology_structure_score
+            if current_topology_structure_score is not None:
+                checkpoint_best_topology_structure_score = (
+                    current_topology_structure_score
+                    if best_topology_structure_score is None
+                    else max(best_topology_structure_score, current_topology_structure_score)
                 )
             checkpoint_metrics = {"val_loss": float(val_loss)}
             if topology_eval_metrics is not None:
@@ -300,6 +361,7 @@ def main() -> None:
                 vocab_path=args.train_token_root / "vocab.json",
                 special_token_ids=special_token_ids,
                 best_topology_valid_rate=checkpoint_best_topology_valid_rate,
+                best_topology_structure_score=checkpoint_best_topology_structure_score,
                 metrics=checkpoint_metrics,
             )
             if val_loss < best_val_loss:
@@ -316,6 +378,7 @@ def main() -> None:
                     vocab_path=args.train_token_root / "vocab.json",
                     special_token_ids=special_token_ids,
                     best_topology_valid_rate=checkpoint_best_topology_valid_rate,
+                    best_topology_structure_score=checkpoint_best_topology_structure_score,
                     metrics=checkpoint_metrics,
                 )
             if current_topology_valid_rate is not None and (
@@ -334,6 +397,27 @@ def main() -> None:
                     vocab_path=args.train_token_root / "vocab.json",
                     special_token_ids=special_token_ids,
                     best_topology_valid_rate=best_topology_valid_rate,
+                    best_topology_structure_score=checkpoint_best_topology_structure_score,
+                    metrics=checkpoint_metrics,
+                )
+            if current_topology_structure_score is not None and (
+                best_topology_structure_score is None
+                or current_topology_structure_score > best_topology_structure_score
+            ):
+                best_topology_structure_score = float(current_topology_structure_score)
+                save_checkpoint(
+                    output_dir / "ckpt_best_topology_structure.pt",
+                    model=raw_model,
+                    optimizer=optimizer,
+                    scaler=scaler,
+                    iter_num=iter_num,
+                    best_val_loss=best_val_loss,
+                    model_config=model_config,
+                    train_config=train_config,
+                    vocab_path=args.train_token_root / "vocab.json",
+                    special_token_ids=special_token_ids,
+                    best_topology_valid_rate=checkpoint_best_topology_valid_rate,
+                    best_topology_structure_score=best_topology_structure_score,
                     metrics=checkpoint_metrics,
                 )
 
@@ -351,6 +435,7 @@ def main() -> None:
                 vocab_path=args.train_token_root / "vocab.json",
                 special_token_ids=special_token_ids,
                 best_topology_valid_rate=best_topology_valid_rate,
+                best_topology_structure_score=best_topology_structure_score,
             )
 
 
