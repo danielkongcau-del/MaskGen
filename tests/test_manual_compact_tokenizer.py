@@ -19,6 +19,7 @@ from partition_gen.parse_graph_tokenizer import (
     tokens_to_ids,
 )
 from scripts.build_manual_split_dataset import build_split_dataset
+from scripts.replay_manual_split_dataset import resolve_split_root_and_manifest
 from scripts.tokenize_manual_split_dataset import _tokenize_target
 
 
@@ -264,6 +265,24 @@ class ManualCompactTokenizerTests(unittest.TestCase):
 
             self.assertEqual(topology_tokens[1], "MANUAL_TOPOLOGY_V1")
             self.assertEqual(geometry_tokens[1], "MANUAL_GEOMETRY_V1")
+
+    def test_replay_manifest_resolution_accepts_tokenized_summary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target_split = root / "targets" / "val"
+            target_split.mkdir(parents=True)
+            (target_split / "manifest.jsonl").write_text("", encoding="utf-8")
+            token_split = root / "tokens" / "val"
+            token_split.mkdir(parents=True)
+            (token_split / "summary.json").write_text(
+                json.dumps({"split_root": str(target_split.as_posix())}),
+                encoding="utf-8",
+            )
+
+            resolved_root, manifest_path = resolve_split_root_and_manifest(token_split)
+
+            self.assertEqual(resolved_root, target_split)
+            self.assertEqual(manifest_path, target_split / "manifest.jsonl")
 
 
 if __name__ == "__main__":
