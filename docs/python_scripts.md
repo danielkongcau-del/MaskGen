@@ -172,6 +172,18 @@ Samples a manual topology AR checkpoint and writes validity plus structural-dist
 
 It supports both unconstrained and constrained sampling. The constrained sampler enforces the token grammar plus topology semantics by default: insert-group children reserve future `ROLE_INSERT` nodes, relation endpoints are role-filtered, and duplicate/self relation pairs are masked. Optional `--count-prior-token-root` or `--count-prior-json` plus `--count-prior-weight` blends training-set count priors into `node_count`, insert-group `child_count`, `REL_BLOCK_DIVIDES` count, and `REL_BLOCK_ADJACENT_TO` count logits without changing the allowed token set. Experimental `--complexity-level` applies a single monotonic high-count tilt to those same count decisions for diagnostics. The summary includes grammar valid rate, semantic-valid rate, EOS count, node-count stats, role/label histograms, role-label histogram, relation means per valid sample, and invalid failure reasons.
 
+### `scripts/decode_manual_topology_samples.py`
+
+Decodes sampled `MANUAL_TOPOLOGY_V1` JSONL rows into `manual_parse_graph_topology_v1` target JSON files.
+
+It validates each sample first and skips semantic-invalid rows by default. Decoded renderable nodes use `geometry_ref=<node id>` so the result can be passed to the topology/geometry merge step.
+
+### `scripts/replay_manual_split_dataset.py`
+
+Replays an existing manual topology/geometry split dataset into full `parse_graph` generator targets.
+
+It loads `manifest.jsonl`, validates topology geometry references, merges each topology target with its per-node geometry targets, restores missing `contains` relations from insert-group children when needed, and writes full parse graph JSONs plus a replay manifest and summary. This is an oracle downstream harness for checking the split pipeline before a learned geometry generator exists.
+
 ### `scripts/summarize_weak_explainer_benchmark.py`
 
 Summarizes a weak explainer benchmark JSONL into Markdown or JSON.
