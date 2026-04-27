@@ -172,6 +172,12 @@ Samples a manual topology AR checkpoint and writes validity plus structural-dist
 
 It supports both unconstrained and constrained sampling. The constrained sampler enforces the token grammar plus topology semantics by default: insert-group children reserve future `ROLE_INSERT` nodes, relation endpoints are role-filtered, and duplicate/self relation pairs are masked. Optional `--count-prior-token-root` or `--count-prior-json` plus `--count-prior-weight` blends training-set count priors into `node_count`, insert-group `child_count`, `REL_BLOCK_DIVIDES` count, and `REL_BLOCK_ADJACENT_TO` count logits without changing the allowed token set. Experimental `--complexity-level` applies a single monotonic high-count tilt to those same count decisions for diagnostics. The summary includes grammar valid rate, semantic-valid rate, EOS count, node-count stats, role/label histograms, role-label histogram, relation means per valid sample, and invalid failure reasons.
 
+### `scripts/attach_placeholder_geometry_to_topology_samples.py`
+
+Attaches retrieved real geometry targets to generated manual topology samples as a downstream smoke test before a learned geometry generator exists.
+
+It decodes semantic-valid `MANUAL_TOPOLOGY_V1` sample rows into topology targets, samples placeholder geometry from a manual split dataset by `(role, label, geometry_model)` with fallbacks, and writes full `parse_graph` JSONs plus a manifest and summary. The output is diagnostic, not final generation quality, because geometry is retrieved independently of the generated topology.
+
 ### `scripts/summarize_weak_explainer_benchmark.py`
 
 Summarizes a weak explainer benchmark JSONL into Markdown or JSON.
