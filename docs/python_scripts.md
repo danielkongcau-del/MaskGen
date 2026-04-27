@@ -182,7 +182,7 @@ It validates each sample first and skips semantic-invalid rows by default. Decod
 
 Replays an existing manual topology/geometry split dataset into full `parse_graph` generator targets.
 
-It loads `manifest.jsonl`, validates topology geometry references, merges each topology target with its per-node geometry targets, restores missing `contains` relations from insert-group children when needed, and writes full parse graph JSONs plus a replay manifest and summary. It accepts either a target split root with `manifest.jsonl` or a tokenized split root whose `summary.json` points back to the target split root. This is an oracle downstream harness for checking the split pipeline before a learned geometry generator exists.
+It loads `manifest.jsonl`, validates topology geometry references, merges each topology target with its per-node geometry targets, restores missing `contains` relations from insert-group children when needed, and writes full parse graph JSONs plus a replay manifest and summary. This is an oracle downstream harness for checking the split pipeline before a learned geometry generator exists.
 
 ### `scripts/summarize_weak_explainer_benchmark.py`
 

@@ -17,13 +17,7 @@ from partition_gen.manual_target_split import merge_topology_geometry_targets  #
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Replay a manual topology/geometry split dataset into full parse graph targets.")
-    parser.add_argument(
-        "--split-root",
-        type=Path,
-        required=True,
-        help="Root containing manifest.jsonl, topology/, and geometry/. Tokenized roots with summary.json are also accepted.",
-    )
-    parser.add_argument("--split", type=str, default=None, help="Optional split name when --split-root is a dataset root.")
+    parser.add_argument("--split-root", type=Path, required=True, help="Root containing manifest.jsonl, topology/, and geometry/.")
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--allow-missing-geometry", action="store_true")
@@ -55,35 +49,6 @@ def write_jsonl(path: Path, rows: Sequence[dict]) -> None:
             handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
-def resolve_split_root_and_manifest(split_root: Path, *, split: str | None = None) -> tuple[Path, Path]:
-    candidates: list[Path] = []
-
-    summary_path = split_root / "summary.json"
-    if summary_path.exists():
-        summary = load_json(summary_path)
-        summary_split_root = summary.get("split_root")
-        if summary_split_root is not None:
-            candidates.append(Path(str(summary_split_root)) / "manifest.jsonl")
-            if split:
-                candidates.append(Path(str(summary_split_root)) / split / "manifest.jsonl")
-
-    candidates.append(split_root / "manifest.jsonl")
-    if split:
-        candidates.append(split_root / split / "manifest.jsonl")
-
-    for manifest_path in candidates:
-        if manifest_path.exists():
-            return manifest_path.parent, manifest_path
-
-    searched = "\n".join(f"  - {path.as_posix()}" for path in candidates)
-    raise FileNotFoundError(
-        "Could not find a manual topology/geometry split manifest.jsonl.\n"
-        f"Searched:\n{searched}\n"
-        "This replay step needs the target split JSON dataset, not only topology/geometry token JSONL files. "
-        "If the target split dataset is missing, rebuild it with scripts/build_manual_split_dataset.py first."
-    )
-
-
 def resolve_manifest_path(value: object, *, split_root: Path, manifest_parent: Path) -> Path:
     path = Path(str(value))
     if path.exists():
@@ -97,11 +62,6 @@ def resolve_manifest_path(value: object, *, split_root: Path, manifest_parent: P
 
 def replay_row(row: dict, *, split_root: Path, manifest_parent: Path, output_root: Path, require_all_geometry: bool) -> dict:
     topology_path = resolve_manifest_path(row["topology_path"], split_root=split_root, manifest_parent=manifest_parent)
-    if int(row.get("geometry_target_count", 0)) > 0 and not row.get("geometry_paths"):
-        raise ValueError(
-            "Manifest row has geometry_target_count > 0 but no geometry_paths. "
-            "This looks like a tokenized split manifest; replay needs the target split manifest."
-        )
     geometry_paths = [
         resolve_manifest_path(value, split_root=split_root, manifest_parent=manifest_parent)
         for value in row.get("geometry_paths", []) or []
@@ -158,7 +118,8 @@ def summarize(rows: Sequence[dict], *, split_root: Path, output_root: Path) -> d
 
 def main() -> None:
     args = parse_args()
-    split_root, manifest_path = resolve_split_root_and_manifest(args.split_root, split=args.split)
+    split_root = args.split_root
+    manifest_path = split_root / "manifest.jsonl"
     rows = list(iter_jsonl(manifest_path))
     if args.max_samples is not None:
         rows = rows[: int(args.max_samples)]
