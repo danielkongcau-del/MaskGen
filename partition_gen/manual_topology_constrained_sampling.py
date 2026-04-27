@@ -26,6 +26,7 @@ class TopologyConstrainedSamplerConfig:
     force_size: tuple[int, int] = (256, 256)
     force_residual_zero: bool = True
     allow_other_relations: bool = False
+    enforce_semantics: bool = True
     allowed_roles: tuple[str, ...] = ROLE_TOKENS
 
 
@@ -46,6 +47,12 @@ class TopologyGrammarState:
     other_relation_index: int = 0
     other_ref_count: int = 0
     other_ref_index: int = 0
+    node_roles: List[str] = field(default_factory=list)
+    required_node_roles: Dict[int, str] = field(default_factory=dict)
+    assigned_insert_children: set[int] = field(default_factory=set)
+    current_children: set[int] = field(default_factory=set)
+    relation_pairs: Dict[str, List[tuple[int, int]]] = field(default_factory=dict)
+    current_pair_left: int | None = None
     done: bool = False
     errors: List[str] = field(default_factory=list)
 
@@ -68,7 +75,7 @@ class TopologyGrammarState:
         if self.phase == "node_start":
             return ["NODE"]
         if self.phase == "node_role":
-            return list(cfg.allowed_roles)
+            return self._allowed_role_tokens()
         if self.phase == "node_label":
             return self._int_tokens(0, int(cfg.max_label))
         if self.phase == "node_renderable":
@@ -82,10 +89,13 @@ class TopologyGrammarState:
         if self.phase == "children_token":
             return ["CHILDREN"]
         if self.phase == "child_count":
+            if cfg.enforce_semantics:
+                upper = min(int(cfg.max_children_per_group), len(self._child_index_candidates()))
+                return self._int_tokens(1, upper)
             upper = min(int(cfg.max_children_per_group), self._max_node_index() + 1)
             return self._int_tokens(0, upper)
         if self.phase == "child_index":
-            return self._node_index_tokens()
+            return self._child_index_tokens() if cfg.enforce_semantics else self._node_index_tokens()
         if self.phase == "end_node":
             return ["END_NODE"]
         if self.phase == "pair_block_token":
@@ -93,9 +103,9 @@ class TopologyGrammarState:
                 return [PAIR_BLOCKS[self.pair_block_index]]
             return ["REL_BLOCK_OTHER"]
         if self.phase == "pair_count":
-            return self._int_tokens(0, int(cfg.max_relation_pairs))
+            return self._pair_count_tokens() if cfg.enforce_semantics else self._int_tokens(0, int(cfg.max_relation_pairs))
         if self.phase == "pair_endpoint":
-            return self._node_index_tokens()
+            return self._pair_endpoint_tokens() if cfg.enforce_semantics else self._node_index_tokens()
         if self.phase == "end_block":
             return ["END_BLOCK"]
         if self.phase == "other_count":
@@ -136,14 +146,25 @@ class TopologyGrammarState:
         elif self.phase == "node_count":
             self.node_count = int(token_int(token))
             self.node_index = 0
+            self.node_roles = []
+            self.required_node_roles = {}
+            self.assigned_insert_children = set()
+            self.current_children = set()
+            self.relation_pairs = {}
+            self.current_pair_left = None
             self.phase = "node_start" if self.node_count > 0 else "pair_block_token"
         elif self.phase == "node_start":
             self.current_role = None
             self.current_child_count = 0
             self.current_child_index = 0
+            self.current_children = set()
             self.phase = "node_role"
         elif self.phase == "node_role":
             self.current_role = token
+            if len(self.node_roles) == self.node_index:
+                self.node_roles.append(token)
+            elif len(self.node_roles) > self.node_index:
+                self.node_roles[self.node_index] = token
             self.phase = "node_label"
         elif self.phase == "node_label":
             self.phase = "node_renderable"
@@ -160,8 +181,13 @@ class TopologyGrammarState:
         elif self.phase == "child_count":
             self.current_child_count = int(token_int(token))
             self.current_child_index = 0
+            self.current_children = set()
             self.phase = "child_index" if self.current_child_count > 0 else "end_node"
         elif self.phase == "child_index":
+            child_index = int(token_int(token))
+            self.current_children.add(child_index)
+            self.assigned_insert_children.add(child_index)
+            self.required_node_roles[child_index] = "ROLE_INSERT"
             self.current_child_index += 1
             self.phase = "end_node" if self.current_child_index >= self.current_child_count else "child_index"
         elif self.phase == "end_node":
@@ -178,13 +204,23 @@ class TopologyGrammarState:
                 self.current_pair_count = 0
                 self.current_pair_index = 0
                 self.current_pair_endpoint = 0
+                self.current_pair_left = None
                 self.phase = "pair_count"
         elif self.phase == "pair_count":
             self.current_pair_count = int(token_int(token))
             self.current_pair_index = 0
             self.current_pair_endpoint = 0
+            self.current_pair_left = None
             self.phase = "pair_endpoint" if self.current_pair_count > 0 else "end_block"
         elif self.phase == "pair_endpoint":
+            endpoint = int(token_int(token))
+            if self.current_pair_endpoint == 0:
+                self.current_pair_left = endpoint
+            else:
+                block_name = self._current_pair_block_name()
+                if block_name is not None and self.current_pair_left is not None:
+                    self.relation_pairs.setdefault(block_name, []).append((int(self.current_pair_left), endpoint))
+                self.current_pair_left = None
             self.current_pair_endpoint += 1
             if self.current_pair_endpoint >= 2:
                 self.current_pair_endpoint = 0
@@ -245,6 +281,143 @@ class TopologyGrammarState:
 
     def _node_index_tokens(self) -> List[str]:
         return self._int_tokens(0, self._max_node_index())
+
+    def _allowed_role_tokens(self) -> List[str]:
+        allowed = [role for role in self.config.allowed_roles if role in ROLE_TOKENS]
+        if not self.config.enforce_semantics:
+            return allowed
+        required_role = self.required_node_roles.get(int(self.node_index))
+        if required_role is not None:
+            return [required_role] if required_role in allowed else []
+        output = [role for role in allowed if role != "ROLE_INSERT"]
+        if "ROLE_INSERT_GROUP" in output and (
+            not self._child_index_candidates_for_parent(int(self.node_index))
+            or not self._has_existing_insert_container()
+        ):
+            output.remove("ROLE_INSERT_GROUP")
+        return output
+
+    def _child_index_tokens(self) -> List[str]:
+        return [f"I_{index}" for index in self._child_index_candidates()]
+
+    def _child_index_candidates(self) -> List[int]:
+        return self._child_index_candidates_for_parent(int(self.node_index), exclude_current_children=True)
+
+    def _child_index_candidates_for_parent(
+        self,
+        parent_index: int,
+        *,
+        exclude_current_children: bool = False,
+    ) -> List[int]:
+        candidates: List[int] = []
+        current_children = self.current_children if exclude_current_children else set()
+        for index in range(0, self._max_node_index() + 1):
+            if index == int(parent_index):
+                continue
+            if index in current_children:
+                continue
+            if index in self.assigned_insert_children:
+                continue
+            required_role = self.required_node_roles.get(index)
+            if required_role is not None and required_role != "ROLE_INSERT":
+                continue
+            known_role = self.node_roles[index] if index < len(self.node_roles) else None
+            if known_role is not None and known_role != "ROLE_INSERT":
+                continue
+            candidates.append(int(index))
+        return candidates
+
+    def _current_pair_block_name(self) -> str | None:
+        if 0 <= int(self.pair_block_index) < len(PAIR_BLOCKS):
+            return PAIR_BLOCKS[int(self.pair_block_index)]
+        return None
+
+    def _pair_count_tokens(self) -> List[str]:
+        cfg = self.config
+        block_name = self._current_pair_block_name()
+        if block_name is None:
+            return []
+        possible_count = len(self._possible_pair_keys(block_name))
+        upper = min(int(cfg.max_relation_pairs), int(possible_count))
+        if block_name == "REL_BLOCK_INSERTED_IN":
+            required = self._role_indices("ROLE_INSERT_GROUP")
+            exact = min(upper, len(required))
+            return [f"I_{exact}"]
+        return self._int_tokens(0, upper)
+
+    def _pair_endpoint_tokens(self) -> List[str]:
+        block_name = self._current_pair_block_name()
+        if block_name is None:
+            return []
+        if self.current_pair_endpoint == 0:
+            candidates = self._pair_left_candidates(block_name)
+        elif self.current_pair_left is None:
+            candidates = []
+        else:
+            candidates = self._pair_right_candidates(block_name, int(self.current_pair_left))
+        return [f"I_{index}" for index in candidates]
+
+    def _pair_left_candidates(self, block_name: str) -> List[int]:
+        if block_name == "REL_BLOCK_INSERTED_IN":
+            used_left = {left for left, _right in self.relation_pairs.get(block_name, [])}
+            return [index for index in self._role_indices("ROLE_INSERT_GROUP") if index not in used_left]
+        if block_name == "REL_BLOCK_DIVIDES":
+            return [
+                index
+                for index in self._role_indices("ROLE_DIVIDER")
+                if self._pair_right_candidates(block_name, index)
+            ]
+        if block_name == "REL_BLOCK_ADJACENT_TO":
+            return [
+                index
+                for index in self._role_indices("ROLE_SUPPORT", "ROLE_INSERT_GROUP", "ROLE_INSERT")
+                if self._pair_right_candidates(block_name, index)
+            ]
+        return []
+
+    def _pair_right_candidates(self, block_name: str, left: int) -> List[int]:
+        if block_name == "REL_BLOCK_INSERTED_IN":
+            candidates = self._role_indices("ROLE_SUPPORT", "ROLE_INSERT_GROUP")
+        elif block_name == "REL_BLOCK_DIVIDES":
+            candidates = self._role_indices("ROLE_SUPPORT", "ROLE_INSERT_GROUP")
+        elif block_name == "REL_BLOCK_ADJACENT_TO":
+            candidates = self._role_indices("ROLE_SUPPORT", "ROLE_INSERT_GROUP", "ROLE_INSERT")
+        else:
+            return []
+
+        output: List[int] = []
+        seen_keys = self._seen_pair_keys(block_name)
+        for right in candidates:
+            if right == left:
+                continue
+            key = self._pair_key(block_name, left, right)
+            if key in seen_keys:
+                continue
+            output.append(int(right))
+        return output
+
+    def _possible_pair_keys(self, block_name: str) -> set[tuple[int, int]]:
+        keys: set[tuple[int, int]] = set()
+        for left in self._pair_left_candidates(block_name):
+            for right in self._pair_right_candidates(block_name, left):
+                keys.add(self._pair_key(block_name, left, right))
+        return keys
+
+    def _seen_pair_keys(self, block_name: str) -> set[tuple[int, int]]:
+        return {self._pair_key(block_name, left, right) for left, right in self.relation_pairs.get(block_name, [])}
+
+    @staticmethod
+    def _pair_key(block_name: str, left: int, right: int) -> tuple[int, int]:
+        if block_name == "REL_BLOCK_ADJACENT_TO":
+            return tuple(sorted((int(left), int(right))))
+        return int(left), int(right)
+
+    def _role_indices(self, *roles: str) -> List[int]:
+        role_set = set(str(role) for role in roles)
+        return [index for index, role in enumerate(self.node_roles) if str(role) in role_set]
+
+    def _has_existing_insert_container(self) -> bool:
+        return any(role in {"ROLE_SUPPORT", "ROLE_INSERT_GROUP"} for role in self.node_roles[: int(self.node_index)])
 
     @staticmethod
     def _int_tokens(low: int, high: int) -> List[str]:

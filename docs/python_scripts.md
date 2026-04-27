@@ -170,7 +170,7 @@ score improves.
 
 Samples a manual topology AR checkpoint and writes validity plus structural-distribution metrics.
 
-It supports both unconstrained and grammar-constrained sampling. The summary includes grammar valid rate, semantic-valid rate, EOS count, node-count stats, role/label histograms, role-label histogram, relation means per valid sample, and invalid failure reasons.
+It supports both unconstrained and constrained sampling. The constrained sampler enforces the token grammar plus topology semantics by default: insert-group children reserve future `ROLE_INSERT` nodes, relation endpoints are role-filtered, and duplicate/self relation pairs are masked. The summary includes grammar valid rate, semantic-valid rate, EOS count, node-count stats, role/label histograms, role-label histogram, relation means per valid sample, and invalid failure reasons.
 
 ### `scripts/summarize_weak_explainer_benchmark.py`
 

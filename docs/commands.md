@@ -276,8 +276,10 @@ conda run -n lmf python scripts/evaluate_manual_topology_ar.py `
   --top-k 50
 ```
 
-Use grammar-constrained evaluation for deployment-style topology sampling. The default `--max-nodes` is 512,
-which covers the current long-tail topology training samples.
+Use constrained evaluation for deployment-style topology sampling. The constrained sampler enforces the grammar
+plus topology semantics by default: insert-group children reserve future `ROLE_INSERT` nodes, relation endpoints
+are role-filtered, and duplicate/self relation pairs are masked. The default `--max-nodes` is 512, which covers
+the current long-tail topology training samples.
 
 ```powershell
 conda run -n lmf python scripts/evaluate_manual_topology_ar.py `
