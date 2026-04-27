@@ -202,6 +202,12 @@ Audits full manual `parse_graph` targets, including placeholder-geometry outputs
 
 It resolves a single JSON, a `graphs/` directory, or an output root with `manifest.jsonl`, then checks whether each target can be re-encoded by both the legacy manual tokenizer and compact manual tokenizer. It also reports missing renderable geometry payloads, node/relation statistics, token-length statistics, and role/label histograms.
 
+### `scripts/audit_manual_parse_graph_spatial.py`
+
+Audits spatial placement of renderable polygon nodes in full manual `parse_graph` targets.
+
+It uses the same local-to-world transform as the visualization script, then reports whether polygon bboxes intersect the canvas, whether origins or bbox centers are near edges/corners, bbox size statistics, and origin/role/label histograms. This is useful for diagnosing geometry generators that are structurally valid but render mostly blank or collapsed into corners.
+
 ### `scripts/visualize_manual_parse_graph_target.py`
 
 Renders full manual `parse_graph` targets to PNG.
