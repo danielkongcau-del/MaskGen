@@ -264,6 +264,8 @@ def sample_model_topology_rows(
     top_k: int | None,
     device,
     constraint_config=None,
+    progress_every: int = 0,
+    progress_label: str = "topology_sample",
 ) -> List[dict]:
     import torch
 
@@ -318,6 +320,10 @@ def sample_model_topology_rows(
                         "tokens": ids_to_tokens(generated, vocab),
                     }
                 rows.append(row)
+                if int(progress_every) > 0 and (
+                    (sample_index + 1) % int(progress_every) == 0 or sample_index + 1 == int(num_samples)
+                ):
+                    print(f"{progress_label} {sample_index + 1}/{int(num_samples)}", flush=True)
     finally:
         if was_training:
             model.train()
@@ -335,6 +341,8 @@ def evaluate_model_topology_samples(
     device,
     constraint_config=None,
     top_k_invalid: int = 20,
+    progress_every: int = 0,
+    progress_label: str = "topology_eval_sample",
 ) -> Dict[str, object]:
     rows = sample_model_topology_rows(
         model,
@@ -345,6 +353,8 @@ def evaluate_model_topology_samples(
         top_k=top_k,
         device=device,
         constraint_config=constraint_config,
+        progress_every=int(progress_every),
+        progress_label=progress_label,
     )
     summary = evaluate_topology_sample_rows(rows, top_k_invalid=int(top_k_invalid))
     summary["sampling_mode"] = "constrained" if constraint_config is not None else "unconstrained"

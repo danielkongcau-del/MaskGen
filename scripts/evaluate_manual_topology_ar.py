@@ -43,6 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-relation-pairs", type=int, default=512)
     parser.add_argument("--allow-other-relations", action="store_true")
     parser.add_argument("--top-k-invalid", type=int, default=20)
+    parser.add_argument("--progress-every", type=int, default=10)
     return parser.parse_args()
 
 
@@ -90,6 +91,8 @@ def main() -> None:
         top_k=int(args.top_k) if int(args.top_k) > 0 else None,
         device=device,
         constraint_config=constraint_config,
+        progress_every=int(args.progress_every),
+        progress_label="topology_eval",
     )
     for row in rows:
         row["checkpoint"] = str(args.checkpoint.as_posix())

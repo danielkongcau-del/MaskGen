@@ -66,6 +66,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--topology-eval-temperature", type=float, default=0.7)
     parser.add_argument("--topology-eval-top-k", type=int, default=50)
     parser.add_argument("--topology-eval-top-k-invalid", type=int, default=20)
+    parser.add_argument("--topology-eval-progress-every", type=int, default=10)
     parser.add_argument("--max-train-samples", type=int, default=None)
     parser.add_argument("--max-val-samples", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -239,6 +240,13 @@ def main() -> None:
             topology_eval_summary = None
             topology_eval_metrics = None
             if int(args.topology_eval_samples) > 0:
+                print(
+                    "topology_eval_start "
+                    f"iter={iter_num} samples={int(args.topology_eval_samples)} "
+                    f"max_new_tokens={int(args.topology_eval_max_new_tokens)} "
+                    f"temperature={float(args.topology_eval_temperature)}",
+                    flush=True,
+                )
                 topology_eval_summary = evaluate_model_topology_samples(
                     raw_model,
                     vocab,
@@ -249,6 +257,8 @@ def main() -> None:
                     device=device,
                     constraint_config=None,
                     top_k_invalid=int(args.topology_eval_top_k_invalid),
+                    progress_every=int(args.topology_eval_progress_every),
+                    progress_label=f"topology_eval iter={iter_num}",
                 )
                 topology_eval_summary["iter"] = int(iter_num)
                 topology_eval_summary["val_loss"] = float(val_loss)
