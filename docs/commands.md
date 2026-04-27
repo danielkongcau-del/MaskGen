@@ -247,7 +247,9 @@ This is useful for comparison, but not the current preferred path.
 Train the topology-only manual parse-graph generator with optional sampling-based topology validation. When
 `--topology-eval-samples` is positive, each eval interval samples unconstrained topology sequences, writes
 `topology_eval_iter_<iter>.json`, logs `topology_eval` rows, and saves `ckpt_best_topology_valid.pt` when the
-sampled valid rate improves. It also estimates target structure means from the training token set and saves
+sampled semantic-valid rate improves. Grammar `valid_rate` checks token syntax; `semantic_valid_rate` additionally
+checks role attributes, insert-group children, relation endpoint roles, duplicate/self relations, and unused
+`REL_BLOCK_OTHER`. It also estimates target structure means from the training token set and saves
 `ckpt_best_topology_structure.pt` when the validity-plus-structure score improves.
 
 ```powershell

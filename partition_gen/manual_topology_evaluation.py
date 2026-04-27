@@ -165,7 +165,9 @@ def evaluate_topology_sample_rows(
     sample_count = int(len(rows))
     validation_results: List[dict] = []
     failure_histogram: Counter[str] = Counter()
+    semantic_failure_histogram: Counter[str] = Counter()
     invalid_samples: List[dict] = []
+    semantic_invalid_samples: List[dict] = []
     lengths: List[int] = []
     valid_lengths: List[int] = []
     node_counts: List[int] = []
@@ -201,6 +203,17 @@ def evaluate_topology_sample_rows(
                     }
                 )
             continue
+        if not validation.get("semantic_valid", False):
+            reason = str(validation["semantic_errors"][0]) if validation.get("semantic_errors") else "unknown"
+            semantic_failure_histogram[reason] += 1
+            if len(semantic_invalid_samples) < int(top_k_invalid):
+                semantic_invalid_samples.append(
+                    {
+                        "sample_index": row.get("sample_index", row_index),
+                        "length": int(len(tokens)),
+                        "semantic_errors": list(validation.get("semantic_errors", [])),
+                    }
+                )
         try:
             parsed = parse_topology_structure(tokens)
         except Exception as error:  # noqa: BLE001 - diagnostic summary records parser failures.
@@ -222,6 +235,7 @@ def evaluate_topology_sample_rows(
         geometry_refs.update({str(key): int(value) for key, value in parsed["geometry_refs"].items()})
 
     valid_count = sum(1 for result in validation_results if result["valid"])
+    semantic_valid_count = sum(1 for result in validation_results if result.get("semantic_valid", False))
     valid_structure_count = len(node_counts)
     denominator = max(1, valid_structure_count)
     return {
@@ -230,6 +244,8 @@ def evaluate_topology_sample_rows(
         "hit_eos_count": int(hit_eos_count),
         "valid_count": int(valid_count),
         "valid_rate": float(valid_count / sample_count) if sample_count else 0.0,
+        "semantic_valid_count": int(semantic_valid_count),
+        "semantic_valid_rate": float(semantic_valid_count / sample_count) if sample_count else 0.0,
         "valid_structure_count": int(valid_structure_count),
         "lengths": _numeric_stats(lengths),
         "valid_lengths": _numeric_stats(valid_lengths),
@@ -249,8 +265,10 @@ def evaluate_topology_sample_rows(
             key: float(value / denominator) for key, value in sorted(relation_totals.items())
         },
         "failure_reason_histogram": dict(failure_histogram.most_common()),
+        "semantic_failure_reason_histogram": dict(semantic_failure_histogram.most_common()),
         "parse_failure_histogram": dict(parse_failures.most_common()),
         "invalid_samples": invalid_samples,
+        "semantic_invalid_samples": semantic_invalid_samples,
     }
 
 
@@ -288,7 +306,7 @@ def score_topology_structure(
             continue
         relative_errors[str(key)] = float(abs(float(actual) - target_value) / max(abs(target_value), float(epsilon)))
     mean_relative_error = float(mean(relative_errors.values())) if relative_errors else None
-    valid_rate = float(summary.get("valid_rate", 0.0))
+    valid_rate = float(summary.get("semantic_valid_rate", summary.get("valid_rate", 0.0)))
     score = None if mean_relative_error is None else float(valid_rate - mean_relative_error)
     return {
         "score": score,
@@ -425,6 +443,8 @@ def write_topology_sample_evaluation_markdown(summary: dict, output_path: Path) 
         f"- samples: {summary['sample_count']}",
         f"- valid: {summary['valid_count']}",
         f"- valid_rate: {summary['valid_rate']:.4f}",
+        f"- semantic_valid: {summary.get('semantic_valid_count', 0)}",
+        f"- semantic_valid_rate: {float(summary.get('semantic_valid_rate', 0.0)):.4f}",
         f"- hit_eos: {summary['hit_eos_count']}",
         f"- length mean / p95 / max: {lengths.get('mean')} / {lengths.get('p95')} / {lengths.get('max')}",
         f"- valid length mean / p95 / max: {valid_lengths.get('mean')} / {valid_lengths.get('p95')} / {valid_lengths.get('max')}",
@@ -445,6 +465,9 @@ def write_topology_sample_evaluation_markdown(summary: dict, output_path: Path) 
         lines.append(f"| `{label}` | {count} |")
     lines.extend(["", "## Failure Reasons", "", "| reason | count |", "| --- | ---: |"])
     for reason, count in (summary.get("failure_reason_histogram") or {}).items():
+        lines.append(f"| `{reason}` | {count} |")
+    lines.extend(["", "## Semantic Failure Reasons", "", "| reason | count |", "| --- | ---: |"])
+    for reason, count in (summary.get("semantic_failure_reason_histogram") or {}).items():
         lines.append(f"| `{reason}` | {count} |")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")

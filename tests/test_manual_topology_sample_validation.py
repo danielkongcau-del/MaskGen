@@ -61,6 +61,7 @@ class ManualTopologySampleValidationTest(unittest.TestCase):
         tokens = encode_topology_target(self.make_topology_target(), config=ParseGraphTokenizerConfig(max_int=128))
         result = validate_topology_tokens(tokens)
         self.assertTrue(result["valid"], result["errors"])
+        self.assertTrue(result["semantic_valid"], result["semantic_errors"])
         self.assertEqual(result["node_count_declared"], 3)
         self.assertEqual(result["node_count_actual"], 3)
 
@@ -79,6 +80,28 @@ class ManualTopologySampleValidationTest(unittest.TestCase):
         result = validate_topology_tokens(tokens)
         self.assertFalse(result["valid"])
         self.assertTrue(any("endpoint_out_of_range" in error for error in result["errors"]))
+
+    def test_semantic_validation_detects_group_child_role_mismatch(self) -> None:
+        tokens = encode_topology_target(self.make_topology_target(), config=ParseGraphTokenizerConfig(max_int=128))
+        child_count_index = tokens.index("CHILDREN") + 1
+        tokens[child_count_index + 1] = "I_0"
+
+        result = validate_topology_tokens(tokens)
+
+        self.assertTrue(result["valid"], result["errors"])
+        self.assertFalse(result["semantic_valid"])
+        self.assertTrue(any("child_0_role_ROLE_SUPPORT" in error for error in result["semantic_errors"]))
+
+    def test_semantic_validation_detects_inserted_in_role_mismatch(self) -> None:
+        tokens = encode_topology_target(self.make_topology_target(), config=ParseGraphTokenizerConfig(max_int=128))
+        block_index = tokens.index("REL_BLOCK_INSERTED_IN")
+        tokens[block_index + 2] = "I_0"
+
+        result = validate_topology_tokens(tokens)
+
+        self.assertTrue(result["valid"], result["errors"])
+        self.assertFalse(result["semantic_valid"])
+        self.assertTrue(any("left_role_ROLE_SUPPORT" in error for error in result["semantic_errors"]))
 
 
 if __name__ == "__main__":

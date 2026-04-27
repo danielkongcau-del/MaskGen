@@ -129,7 +129,9 @@ def main() -> None:
         write_topology_sample_rows(args.output_samples, rows)
     print(
         f"evaluated samples={summary['sample_count']} valid={summary['valid_count']} "
-        f"valid_rate={summary['valid_rate']:.4f} hit_eos={summary['hit_eos_count']} "
+        f"valid_rate={summary['valid_rate']:.4f} "
+        f"semantic_valid_rate={summary['semantic_valid_rate']:.4f} "
+        f"hit_eos={summary['hit_eos_count']} "
         f"output={args.output_json}"
     )
 

@@ -32,7 +32,9 @@ def main() -> None:
     write_topology_sample_validation_markdown(payload, args.summary_md)
     print(
         f"validated samples={payload['sample_count']} valid={payload['valid_count']} "
-        f"valid_rate={payload['valid_rate']:.4f} hit_eos={payload['hit_eos_count']} "
+        f"valid_rate={payload['valid_rate']:.4f} "
+        f"semantic_valid_rate={payload['semantic_valid_rate']:.4f} "
+        f"hit_eos={payload['hit_eos_count']} "
         f"output={args.output_json}"
     )
 

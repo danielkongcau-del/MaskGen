@@ -79,6 +79,7 @@ def main() -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     rows = []
     valid_count = 0
+    semantic_valid_count = 0
     with torch.no_grad():
         for index in range(int(args.num_samples)):
             sample = sample_topology_constrained(
@@ -93,6 +94,8 @@ def main() -> None:
             validation = validate_topology_tokens(sample["tokens"]) if bool(args.validate) else None
             if validation and validation["valid"]:
                 valid_count += 1
+            if validation and validation["semantic_valid"]:
+                semantic_valid_count += 1
             row = {
                 "format": "maskgen_manual_topology_ar_sample_v1",
                 "sample_index": int(index),
@@ -103,7 +106,9 @@ def main() -> None:
                 "ids": [int(value) for value in sample["ids"]],
                 "tokens": list(sample["tokens"]),
                 "valid": None if validation is None else bool(validation["valid"]),
+                "semantic_valid": None if validation is None else bool(validation["semantic_valid"]),
                 "validation_errors": [] if validation is None else list(validation["errors"]),
+                "semantic_validation_errors": [] if validation is None else list(validation["semantic_errors"]),
                 "constraint_diagnostics": sample["constraint_diagnostics"],
                 "sampling_config": {
                     "max_new_tokens": int(args.max_new_tokens),
@@ -118,7 +123,13 @@ def main() -> None:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":"), default=str) + "\n")
     if bool(args.validate):
-        print(f"wrote samples={len(rows)} valid={valid_count} valid_rate={valid_count / max(1, len(rows)):.4f} output={output}")
+        print(
+            f"wrote samples={len(rows)} valid={valid_count} "
+            f"valid_rate={valid_count / max(1, len(rows)):.4f} "
+            f"semantic_valid={semantic_valid_count} "
+            f"semantic_valid_rate={semantic_valid_count / max(1, len(rows)):.4f} "
+            f"output={output}"
+        )
     else:
         print(f"wrote samples={len(rows)} output={output}")
 

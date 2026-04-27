@@ -81,9 +81,25 @@ class ManualTopologyEvaluationTest(unittest.TestCase):
         self.assertEqual(summary["sample_count"], 2)
         self.assertEqual(summary["valid_count"], 1)
         self.assertEqual(summary["valid_rate"], 0.5)
+        self.assertEqual(summary["semantic_valid_count"], 1)
+        self.assertEqual(summary["semantic_valid_rate"], 0.5)
         self.assertEqual(summary["node_counts"]["mean"], 3.0)
         self.assertEqual(summary["relation_mean_per_valid_sample"]["REL_BLOCK_INSERTED_IN"], 1.0)
         self.assertTrue(summary["failure_reason_histogram"])
+
+    def test_evaluate_topology_sample_rows_summarizes_semantic_invalid(self) -> None:
+        semantic_invalid = self.make_topology_tokens()
+        child_count_index = semantic_invalid.index("CHILDREN") + 1
+        semantic_invalid[child_count_index + 1] = "I_0"
+        summary = evaluate_topology_sample_rows(
+            [{"sample_index": 0, "tokens": semantic_invalid, "length": len(semantic_invalid)}]
+        )
+
+        self.assertEqual(summary["valid_count"], 1)
+        self.assertEqual(summary["valid_rate"], 1.0)
+        self.assertEqual(summary["semantic_valid_count"], 0)
+        self.assertEqual(summary["semantic_valid_rate"], 0.0)
+        self.assertTrue(summary["semantic_failure_reason_histogram"])
 
     def test_score_topology_structure_penalizes_relative_distribution_error(self) -> None:
         summary = evaluate_topology_sample_rows(

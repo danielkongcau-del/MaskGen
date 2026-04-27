@@ -160,7 +160,7 @@ It reads `data/remote_256_generator_targets_*<split>/manifest.jsonl`, keeps trai
 
 Trains the topology-only manual parse-graph AR Transformer on `manual_parse_graph_topology_v1` token sequences.
 
-It can optionally run sampling-based topology validation during eval intervals with `--topology-eval-samples`. When enabled, it writes `topology_eval_iter_<iter>.json`, logs compact topology metrics to `train_log.jsonl`, and saves `ckpt_best_topology_valid.pt` whenever unconstrained sampled valid rate improves.
+It can optionally run sampling-based topology validation during eval intervals with `--topology-eval-samples`. When enabled, it writes `topology_eval_iter_<iter>.json`, logs compact topology metrics to `train_log.jsonl`, and saves `ckpt_best_topology_valid.pt` whenever unconstrained sampled semantic-valid rate improves. Grammar `valid_rate` checks token syntax; `semantic_valid_rate` additionally checks role attributes, insert-group children, relation endpoint roles, duplicate/self relations, and unused `REL_BLOCK_OTHER`.
 
 It also computes topology structure targets from the training token set, or from explicit `--topology-target-*`
 overrides, and saves `ckpt_best_topology_structure.pt` when the sampled valid rate plus structural-distribution
@@ -170,7 +170,7 @@ score improves.
 
 Samples a manual topology AR checkpoint and writes validity plus structural-distribution metrics.
 
-It supports both unconstrained and grammar-constrained sampling. The summary includes valid rate, EOS count, node-count stats, role/label histograms, role-label histogram, relation means per valid sample, and invalid failure reasons.
+It supports both unconstrained and grammar-constrained sampling. The summary includes grammar valid rate, semantic-valid rate, EOS count, node-count stats, role/label histograms, role-label histogram, relation means per valid sample, and invalid failure reasons.
 
 ### `scripts/summarize_weak_explainer_benchmark.py`
 

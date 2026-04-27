@@ -121,6 +121,8 @@ def compact_topology_eval_metrics(summary: dict) -> dict:
     return {
         "valid_rate": float(summary.get("valid_rate", 0.0)),
         "valid_count": int(summary.get("valid_count", 0)),
+        "semantic_valid_rate": float(summary.get("semantic_valid_rate", 0.0)),
+        "semantic_valid_count": int(summary.get("semantic_valid_count", 0)),
         "sample_count": int(summary.get("sample_count", 0)),
         "hit_eos_count": int(summary.get("hit_eos_count", 0)),
         "valid_length_mean": valid_lengths.get("mean"),
@@ -153,6 +155,7 @@ def topology_structure_targets_from_args(args: argparse.Namespace, train_dataset
         "targets": targets,
         "train_summary": {
             "valid_rate": train_summary["valid_rate"],
+            "semantic_valid_rate": train_summary["semantic_valid_rate"],
             "node_counts": train_summary["node_counts"],
             "relation_mean_per_valid_sample": train_summary["relation_mean_per_valid_sample"],
         },
@@ -319,13 +322,14 @@ def main() -> None:
                 print(
                     "topology_eval "
                     f"iter={iter_num} valid_rate={topology_eval_metrics['valid_rate']:.4f} "
+                    f"semantic_valid_rate={topology_eval_metrics['semantic_valid_rate']:.4f} "
                     f"valid={topology_eval_metrics['valid_count']}/{topology_eval_metrics['sample_count']} "
                     f"node_mean={topology_eval_metrics['node_count_mean']} "
                     f"structure_score={topology_eval_metrics['structure_score']}"
                 )
 
             current_topology_valid_rate = (
-                float(topology_eval_metrics["valid_rate"]) if topology_eval_metrics is not None else None
+                float(topology_eval_metrics["semantic_valid_rate"]) if topology_eval_metrics is not None else None
             )
             checkpoint_best_topology_valid_rate = best_topology_valid_rate
             if current_topology_valid_rate is not None:
