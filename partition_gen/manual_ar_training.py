@@ -128,6 +128,8 @@ def save_checkpoint(
     train_config: Dict[str, object],
     vocab_path: Path,
     special_token_ids: Dict[str, int],
+    best_topology_valid_rate: float | None = None,
+    metrics: Dict[str, object] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint = {
@@ -138,6 +140,8 @@ def save_checkpoint(
         "scaler": None if scaler is None else scaler.state_dict(),
         "iter_num": int(iter_num),
         "best_val_loss": float(best_val_loss),
+        "best_topology_valid_rate": None if best_topology_valid_rate is None else float(best_topology_valid_rate),
+        "metrics": {} if metrics is None else metrics,
         "train_config": train_config,
         "vocab_path": str(vocab_path.as_posix()),
         "special_token_ids": special_token_ids,

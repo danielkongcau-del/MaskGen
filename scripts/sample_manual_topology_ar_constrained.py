@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--max-nodes", type=int, default=256)
+    parser.add_argument("--max-nodes", type=int, default=512)
     parser.add_argument("--max-label", type=int, default=6)
     parser.add_argument("--max-children-per-group", type=int, default=128)
     parser.add_argument("--max-relation-pairs", type=int, default=512)

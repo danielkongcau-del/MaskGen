@@ -16,7 +16,7 @@ OTHER_RELATION_TOKENS = ("REL_INSERTED_IN", "REL_CONTAINS", "REL_DIVIDES", "REL_
 
 @dataclass(frozen=True)
 class TopologyConstrainedSamplerConfig:
-    max_nodes: int = 256
+    max_nodes: int = 512
     min_nodes: int = 1
     max_label: int = 6
     max_children_per_group: int = 128

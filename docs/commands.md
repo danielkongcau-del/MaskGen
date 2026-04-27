@@ -242,6 +242,52 @@ conda run -n lmf python scripts/build_convex_partition_single.py `
 
 This is useful for comparison, but not the current preferred path.
 
+## Manual Topology AR Evaluation
+
+Train the topology-only manual parse-graph generator with optional sampling-based topology validation. When
+`--topology-eval-samples` is positive, each eval interval samples unconstrained topology sequences, writes
+`topology_eval_iter_<iter>.json`, logs `topology_eval` rows, and saves `ckpt_best_topology_valid.pt` when the
+sampled valid rate improves.
+
+```powershell
+conda run -n lmf python scripts/train_manual_topology_ar.py `
+  --train-token-root data/remote_256_generator_tokens_manual_split_full/train `
+  --val-token-root data/remote_256_generator_tokens_manual_split_full/val `
+  --output-dir outputs/manual_topology_ar `
+  --run-name topology_v1 `
+  --topology-eval-samples 100 `
+  --topology-eval-temperature 0.7 `
+  --topology-eval-top-k 50
+```
+
+Evaluate a saved checkpoint and write both validity and structural-distribution metrics:
+
+```powershell
+conda run -n lmf python scripts/evaluate_manual_topology_ar.py `
+  --checkpoint outputs/manual_topology_ar/topology_v1/ckpt_iter_5000.pt `
+  --output-json outputs/manual_topology_ar/topology_v1/eval_iter5000_t0.7.json `
+  --summary-md outputs/manual_topology_ar/topology_v1/eval_iter5000_t0.7.md `
+  --output-samples outputs/manual_topology_ar/topology_v1/samples_iter5000_t0.7.jsonl `
+  --num-samples 100 `
+  --temperature 0.7 `
+  --top-k 50
+```
+
+Use grammar-constrained evaluation for deployment-style topology sampling. The default `--max-nodes` is 512,
+which covers the current long-tail topology training samples.
+
+```powershell
+conda run -n lmf python scripts/evaluate_manual_topology_ar.py `
+  --checkpoint outputs/manual_topology_ar/topology_v1/ckpt_iter_5000.pt `
+  --output-json outputs/manual_topology_ar/topology_v1/eval_iter5000_constrained_t0.7.json `
+  --summary-md outputs/manual_topology_ar/topology_v1/eval_iter5000_constrained_t0.7.md `
+  --output-samples outputs/manual_topology_ar/topology_v1/samples_iter5000_constrained_t0.7.jsonl `
+  --num-samples 100 `
+  --temperature 0.7 `
+  --top-k 50 `
+  --constrained
+```
+
 ## Historical Commands
 
 Training and sampling commands for topology, geometry, boundary, and pair-boundary models still exist under `scripts/`.

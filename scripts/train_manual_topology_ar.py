@@ -26,6 +26,7 @@ from partition_gen.manual_ar_training import (  # noqa: E402
     save_checkpoint,
     save_json,
 )
+from partition_gen.manual_topology_evaluation import evaluate_model_topology_samples  # noqa: E402
 from partition_gen.manual_split_token_dataset import (  # noqa: E402
     ManualSplitTokenSequenceDataset,
     collate_manual_split_token_sequences,
@@ -60,6 +61,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-iters", type=int, default=50)
     parser.add_argument("--save-every", type=int, default=500)
     parser.add_argument("--log-every", type=int, default=10)
+    parser.add_argument("--topology-eval-samples", type=int, default=0)
+    parser.add_argument("--topology-eval-max-new-tokens", type=int, default=2048)
+    parser.add_argument("--topology-eval-temperature", type=float, default=0.7)
+    parser.add_argument("--topology-eval-top-k", type=int, default=50)
+    parser.add_argument("--topology-eval-top-k-invalid", type=int, default=20)
     parser.add_argument("--max-train-samples", type=int, default=None)
     parser.add_argument("--max-val-samples", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -95,6 +101,25 @@ def make_loader(dataset: ManualSplitTokenSequenceDataset, *, batch_size: int, sh
         collate_fn=lambda batch: collate_manual_split_token_sequences(batch, pad_id=dataset.pad_id),
         pin_memory=torch.cuda.is_available(),
     )
+
+
+def compact_topology_eval_metrics(summary: dict) -> dict:
+    relation_mean = summary.get("relation_mean_per_valid_sample", {}) or {}
+    node_counts = summary.get("node_counts", {}) or {}
+    valid_lengths = summary.get("valid_lengths", {}) or {}
+    return {
+        "valid_rate": float(summary.get("valid_rate", 0.0)),
+        "valid_count": int(summary.get("valid_count", 0)),
+        "sample_count": int(summary.get("sample_count", 0)),
+        "hit_eos_count": int(summary.get("hit_eos_count", 0)),
+        "valid_length_mean": valid_lengths.get("mean"),
+        "node_count_mean": node_counts.get("mean"),
+        "node_count_p95": node_counts.get("p95"),
+        "node_count_max": node_counts.get("max"),
+        "inserted_in_mean": relation_mean.get("REL_BLOCK_INSERTED_IN"),
+        "divides_mean": relation_mean.get("REL_BLOCK_DIVIDES"),
+        "adjacent_to_mean": relation_mean.get("REL_BLOCK_ADJACENT_TO"),
+    }
 
 
 def main() -> None:
@@ -142,6 +167,7 @@ def main() -> None:
     scaler = build_scaler(device, enabled=bool(args.amp))
     iter_num = 0
     best_val_loss = float("inf")
+    best_topology_valid_rate: float | None = None
     if args.resume is not None:
         checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
         model.load_state_dict(checkpoint["model"])
@@ -151,6 +177,9 @@ def main() -> None:
             scaler.load_state_dict(checkpoint["scaler"])
         iter_num = int(checkpoint.get("iter_num", 0))
         best_val_loss = float(checkpoint.get("best_val_loss", float("inf")))
+        checkpoint_best_topology = checkpoint.get("best_topology_valid_rate")
+        if checkpoint_best_topology is not None:
+            best_topology_valid_rate = float(checkpoint_best_topology)
 
     if args.compile:
         model = torch.compile(model)
@@ -207,6 +236,48 @@ def main() -> None:
             append_jsonl(output_dir / "train_log.jsonl", {"type": "eval", "iter": iter_num, "val_loss": val_loss})
             print(f"eval iter={iter_num} val_loss={val_loss:.4f}")
             raw_model = model._orig_mod if hasattr(model, "_orig_mod") else model
+            topology_eval_summary = None
+            topology_eval_metrics = None
+            if int(args.topology_eval_samples) > 0:
+                topology_eval_summary = evaluate_model_topology_samples(
+                    raw_model,
+                    vocab,
+                    num_samples=int(args.topology_eval_samples),
+                    max_new_tokens=int(args.topology_eval_max_new_tokens),
+                    temperature=float(args.topology_eval_temperature),
+                    top_k=int(args.topology_eval_top_k) if int(args.topology_eval_top_k) > 0 else None,
+                    device=device,
+                    constraint_config=None,
+                    top_k_invalid=int(args.topology_eval_top_k_invalid),
+                )
+                topology_eval_summary["iter"] = int(iter_num)
+                topology_eval_summary["val_loss"] = float(val_loss)
+                save_json(output_dir / f"topology_eval_iter_{iter_num}.json", topology_eval_summary)
+                topology_eval_metrics = compact_topology_eval_metrics(topology_eval_summary)
+                append_jsonl(
+                    output_dir / "train_log.jsonl",
+                    {"type": "topology_eval", "iter": iter_num, **topology_eval_metrics},
+                )
+                print(
+                    "topology_eval "
+                    f"iter={iter_num} valid_rate={topology_eval_metrics['valid_rate']:.4f} "
+                    f"valid={topology_eval_metrics['valid_count']}/{topology_eval_metrics['sample_count']} "
+                    f"node_mean={topology_eval_metrics['node_count_mean']}"
+                )
+
+            current_topology_valid_rate = (
+                float(topology_eval_metrics["valid_rate"]) if topology_eval_metrics is not None else None
+            )
+            checkpoint_best_topology_valid_rate = best_topology_valid_rate
+            if current_topology_valid_rate is not None:
+                checkpoint_best_topology_valid_rate = (
+                    current_topology_valid_rate
+                    if best_topology_valid_rate is None
+                    else max(best_topology_valid_rate, current_topology_valid_rate)
+                )
+            checkpoint_metrics = {"val_loss": float(val_loss)}
+            if topology_eval_metrics is not None:
+                checkpoint_metrics["topology_eval"] = topology_eval_metrics
             save_checkpoint(
                 output_dir / "ckpt_last.pt",
                 model=raw_model,
@@ -218,6 +289,8 @@ def main() -> None:
                 train_config=train_config,
                 vocab_path=args.train_token_root / "vocab.json",
                 special_token_ids=special_token_ids,
+                best_topology_valid_rate=checkpoint_best_topology_valid_rate,
+                metrics=checkpoint_metrics,
             )
             if val_loss < best_val_loss:
                 best_val_loss = float(val_loss)
@@ -232,6 +305,26 @@ def main() -> None:
                     train_config=train_config,
                     vocab_path=args.train_token_root / "vocab.json",
                     special_token_ids=special_token_ids,
+                    best_topology_valid_rate=checkpoint_best_topology_valid_rate,
+                    metrics=checkpoint_metrics,
+                )
+            if current_topology_valid_rate is not None and (
+                best_topology_valid_rate is None or current_topology_valid_rate > best_topology_valid_rate
+            ):
+                best_topology_valid_rate = float(current_topology_valid_rate)
+                save_checkpoint(
+                    output_dir / "ckpt_best_topology_valid.pt",
+                    model=raw_model,
+                    optimizer=optimizer,
+                    scaler=scaler,
+                    iter_num=iter_num,
+                    best_val_loss=best_val_loss,
+                    model_config=model_config,
+                    train_config=train_config,
+                    vocab_path=args.train_token_root / "vocab.json",
+                    special_token_ids=special_token_ids,
+                    best_topology_valid_rate=best_topology_valid_rate,
+                    metrics=checkpoint_metrics,
                 )
 
         if int(args.save_every) > 0 and iter_num % int(args.save_every) == 0:
@@ -247,6 +340,7 @@ def main() -> None:
                 train_config=train_config,
                 vocab_path=args.train_token_root / "vocab.json",
                 special_token_ids=special_token_ids,
+                best_topology_valid_rate=best_topology_valid_rate,
             )
 
 

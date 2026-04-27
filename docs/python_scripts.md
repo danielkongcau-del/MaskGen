@@ -156,6 +156,18 @@ Tokenizes generator target parse graphs into fixed-grammar token sequences for a
 
 It reads `data/remote_256_generator_targets_*<split>/manifest.jsonl`, keeps training-usable rows by default, writes `sequences.jsonl`, writes a fixed vocabulary, and records token length statistics. The tokenizer uses a structured weak-parse-graph grammar rather than raw JSON text.
 
+### `scripts/train_manual_topology_ar.py`
+
+Trains the topology-only manual parse-graph AR Transformer on `manual_parse_graph_topology_v1` token sequences.
+
+It can optionally run sampling-based topology validation during eval intervals with `--topology-eval-samples`. When enabled, it writes `topology_eval_iter_<iter>.json`, logs compact topology metrics to `train_log.jsonl`, and saves `ckpt_best_topology_valid.pt` whenever unconstrained sampled valid rate improves.
+
+### `scripts/evaluate_manual_topology_ar.py`
+
+Samples a manual topology AR checkpoint and writes validity plus structural-distribution metrics.
+
+It supports both unconstrained and grammar-constrained sampling. The summary includes valid rate, EOS count, node-count stats, role/label histograms, role-label histogram, relation means per valid sample, and invalid failure reasons.
+
 ### `scripts/summarize_weak_explainer_benchmark.py`
 
 Summarizes a weak explainer benchmark JSONL into Markdown or JSON.
