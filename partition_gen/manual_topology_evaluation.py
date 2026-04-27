@@ -328,6 +328,9 @@ def sample_model_topology_rows(
     top_k: int | None,
     device,
     constraint_config=None,
+    count_priors: dict | None = None,
+    count_prior_weight: float = 0.0,
+    count_prior_smoothing: float = 1e-6,
     progress_every: int = 0,
     progress_label: str = "topology_sample",
 ) -> List[dict]:
@@ -354,6 +357,9 @@ def sample_model_topology_rows(
                         top_k=top_k,
                         constraint_config=constraint_config,
                         device=device,
+                        count_priors=count_priors,
+                        count_prior_weight=float(count_prior_weight),
+                        count_prior_smoothing=float(count_prior_smoothing),
                     )
                     row = {
                         "format": "maskgen_manual_topology_ar_sample_v1",
@@ -364,6 +370,7 @@ def sample_model_topology_rows(
                         "ids": [int(value) for value in sample["ids"]],
                         "tokens": list(sample["tokens"]),
                         "constraint_diagnostics": sample["constraint_diagnostics"],
+                        "count_prior_diagnostics": sample["count_prior_diagnostics"],
                     }
                 else:
                     start = torch.tensor([[bos_id]], dtype=torch.long, device=device)
@@ -404,6 +411,9 @@ def evaluate_model_topology_samples(
     top_k: int | None,
     device,
     constraint_config=None,
+    count_priors: dict | None = None,
+    count_prior_weight: float = 0.0,
+    count_prior_smoothing: float = 1e-6,
     top_k_invalid: int = 20,
     progress_every: int = 0,
     progress_label: str = "topology_eval_sample",
@@ -417,6 +427,9 @@ def evaluate_model_topology_samples(
         top_k=top_k,
         device=device,
         constraint_config=constraint_config,
+        count_priors=count_priors,
+        count_prior_weight=float(count_prior_weight),
+        count_prior_smoothing=float(count_prior_smoothing),
         progress_every=int(progress_every),
         progress_label=progress_label,
     )
@@ -428,6 +441,9 @@ def evaluate_model_topology_samples(
         "temperature": float(temperature),
         "top_k": None if top_k is None else int(top_k),
         "constraint_config": None if constraint_config is None else constraint_config.__dict__,
+        "count_prior_enabled": bool(count_priors and float(count_prior_weight) != 0.0),
+        "count_prior_weight": float(count_prior_weight),
+        "count_prior_smoothing": float(count_prior_smoothing),
     }
     return summary
 

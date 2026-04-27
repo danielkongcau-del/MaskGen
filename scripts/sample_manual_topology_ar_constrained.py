@@ -14,6 +14,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from partition_gen.manual_ar_training import load_checkpoint  # noqa: E402
+from partition_gen.manual_topology_count_prior import (  # noqa: E402
+    load_topology_count_prior,
+    topology_count_prior_from_token_root,
+    write_topology_count_prior,
+)
 from partition_gen.manual_topology_constrained_sampling import (  # noqa: E402
     TopologyConstrainedSamplerConfig,
     sample_topology_constrained,
@@ -23,7 +28,7 @@ from partition_gen.parse_graph_tokenizer import load_vocabulary  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Grammar-constrained sampling for manual topology AR checkpoints.")
+    parser = argparse.ArgumentParser(description="Constrained sampling for manual topology AR checkpoints.")
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--num-samples", type=int, default=4)
@@ -37,6 +42,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-children-per-group", type=int, default=128)
     parser.add_argument("--max-relation-pairs", type=int, default=512)
     parser.add_argument("--allow-other-relations", action="store_true")
+    parser.add_argument("--count-prior-token-root", type=Path, default=None)
+    parser.add_argument("--count-prior-json", type=Path, default=None)
+    parser.add_argument("--count-prior-output", type=Path, default=None)
+    parser.add_argument("--count-prior-weight", type=float, default=0.0)
+    parser.add_argument("--count-prior-smoothing", type=float, default=1e-6)
     parser.add_argument("--validate", action="store_true")
     return parser.parse_args()
 
@@ -58,6 +68,22 @@ def _resolve_vocab_path(checkpoint: dict) -> Path:
     return candidate if candidate.exists() else vocab_path
 
 
+def _load_count_prior(args: argparse.Namespace, checkpoint: dict) -> dict | None:
+    if float(args.count_prior_weight) == 0.0 and args.count_prior_json is None and args.count_prior_token_root is None:
+        return None
+    if args.count_prior_json is not None:
+        payload = load_topology_count_prior(args.count_prior_json)
+    else:
+        token_root = args.count_prior_token_root
+        if token_root is None:
+            train_config = checkpoint.get("train_config", {})
+            token_root = Path(str(train_config.get("train_token_root", "")))
+        payload = topology_count_prior_from_token_root(Path(token_root))
+    if args.count_prior_output is not None:
+        write_topology_count_prior(payload, args.count_prior_output)
+    return payload
+
+
 def main() -> None:
     args = parse_args()
     set_seed(int(args.seed))
@@ -66,6 +92,7 @@ def main() -> None:
     model = model.to(device)
     model.eval()
     vocab = load_vocabulary(_resolve_vocab_path(checkpoint))
+    count_prior = _load_count_prior(args, checkpoint)
     constraint_config = TopologyConstrainedSamplerConfig(
         max_nodes=int(args.max_nodes),
         max_label=int(args.max_label),
@@ -90,6 +117,9 @@ def main() -> None:
                 top_k=int(args.top_k) if int(args.top_k) > 0 else None,
                 constraint_config=constraint_config,
                 device=device,
+                count_priors=count_prior,
+                count_prior_weight=float(args.count_prior_weight),
+                count_prior_smoothing=float(args.count_prior_smoothing),
             )
             validation = validate_topology_tokens(sample["tokens"]) if bool(args.validate) else None
             if validation and validation["valid"]:
@@ -110,12 +140,17 @@ def main() -> None:
                 "validation_errors": [] if validation is None else list(validation["errors"]),
                 "semantic_validation_errors": [] if validation is None else list(validation["semantic_errors"]),
                 "constraint_diagnostics": sample["constraint_diagnostics"],
+                "count_prior_diagnostics": sample["count_prior_diagnostics"],
                 "sampling_config": {
                     "max_new_tokens": int(args.max_new_tokens),
                     "temperature": float(args.temperature),
                     "top_k": int(args.top_k),
                     "seed": int(args.seed),
                     "constraint_config": constraint_config.__dict__,
+                    "count_prior_enabled": bool(count_prior and float(args.count_prior_weight) != 0.0),
+                    "count_prior_weight": float(args.count_prior_weight),
+                    "count_prior_smoothing": float(args.count_prior_smoothing),
+                    "count_prior_source": None if count_prior is None else count_prior.get("source"),
                 },
             }
             rows.append(row)

@@ -14,6 +14,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from partition_gen.manual_ar_training import load_checkpoint  # noqa: E402
+from partition_gen.manual_topology_count_prior import (  # noqa: E402
+    load_topology_count_prior,
+    topology_count_prior_from_token_root,
+    write_topology_count_prior,
+)
 from partition_gen.manual_topology_constrained_sampling import TopologyConstrainedSamplerConfig  # noqa: E402
 from partition_gen.manual_topology_evaluation import (  # noqa: E402
     evaluate_topology_sample_rows,
@@ -42,6 +47,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-children-per-group", type=int, default=128)
     parser.add_argument("--max-relation-pairs", type=int, default=512)
     parser.add_argument("--allow-other-relations", action="store_true")
+    parser.add_argument("--count-prior-token-root", type=Path, default=None)
+    parser.add_argument("--count-prior-json", type=Path, default=None)
+    parser.add_argument("--count-prior-output", type=Path, default=None)
+    parser.add_argument("--count-prior-weight", type=float, default=0.0)
+    parser.add_argument("--count-prior-smoothing", type=float, default=1e-6)
     parser.add_argument("--top-k-invalid", type=int, default=20)
     parser.add_argument("--progress-every", type=int, default=10)
     return parser.parse_args()
@@ -64,6 +74,22 @@ def _resolve_vocab_path(checkpoint: dict) -> Path:
     return candidate if candidate.exists() else vocab_path
 
 
+def _load_count_prior(args: argparse.Namespace, checkpoint: dict) -> dict | None:
+    if float(args.count_prior_weight) == 0.0 and args.count_prior_json is None and args.count_prior_token_root is None:
+        return None
+    if args.count_prior_json is not None:
+        payload = load_topology_count_prior(args.count_prior_json)
+    else:
+        token_root = args.count_prior_token_root
+        if token_root is None:
+            train_config = checkpoint.get("train_config", {})
+            token_root = Path(str(train_config.get("train_token_root", "")))
+        payload = topology_count_prior_from_token_root(Path(token_root))
+    if args.count_prior_output is not None:
+        write_topology_count_prior(payload, args.count_prior_output)
+    return payload
+
+
 def main() -> None:
     args = parse_args()
     set_seed(int(args.seed))
@@ -72,6 +98,7 @@ def main() -> None:
     model = model.to(device)
     model.eval()
     vocab = load_vocabulary(_resolve_vocab_path(checkpoint))
+    count_prior = _load_count_prior(args, checkpoint)
     constraint_config = None
     if bool(args.constrained):
         constraint_config = TopologyConstrainedSamplerConfig(
@@ -91,6 +118,9 @@ def main() -> None:
         top_k=int(args.top_k) if int(args.top_k) > 0 else None,
         device=device,
         constraint_config=constraint_config,
+        count_priors=count_prior,
+        count_prior_weight=float(args.count_prior_weight),
+        count_prior_smoothing=float(args.count_prior_smoothing),
         progress_every=int(args.progress_every),
         progress_label="topology_eval",
     )
@@ -103,6 +133,9 @@ def main() -> None:
             "seed": int(args.seed),
             "constrained": bool(args.constrained),
             "constraint_config": None if constraint_config is None else constraint_config.__dict__,
+            "count_prior_enabled": bool(count_prior and float(args.count_prior_weight) != 0.0),
+            "count_prior_weight": float(args.count_prior_weight),
+            "count_prior_smoothing": float(args.count_prior_smoothing),
         }
     summary = evaluate_topology_sample_rows(rows, top_k_invalid=int(args.top_k_invalid))
     summary.update(
@@ -119,6 +152,10 @@ def main() -> None:
                 "seed": int(args.seed),
                 "constrained": bool(args.constrained),
                 "constraint_config": None if constraint_config is None else constraint_config.__dict__,
+                "count_prior_enabled": bool(count_prior and float(args.count_prior_weight) != 0.0),
+                "count_prior_weight": float(args.count_prior_weight),
+                "count_prior_smoothing": float(args.count_prior_smoothing),
+                "count_prior_source": None if count_prior is None else count_prior.get("source"),
             },
         }
     )

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Dict, List, Sequence
+import math
+from typing import Dict, List, Mapping, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -12,6 +13,7 @@ from partition_gen.parse_graph_tokenizer import token_int
 ROLE_TOKENS = ("ROLE_SUPPORT", "ROLE_DIVIDER", "ROLE_INSERT", "ROLE_INSERT_GROUP")
 PAIR_BLOCKS = ("REL_BLOCK_INSERTED_IN", "REL_BLOCK_DIVIDES", "REL_BLOCK_ADJACENT_TO")
 OTHER_RELATION_TOKENS = ("REL_INSERTED_IN", "REL_CONTAINS", "REL_DIVIDES", "REL_ADJACENT_TO", "REL_UNKNOWN")
+COUNT_PRIOR_KEYS = {"node_count", "child_count", "REL_BLOCK_DIVIDES", "REL_BLOCK_ADJACENT_TO"}
 
 
 @dataclass(frozen=True)
@@ -419,6 +421,17 @@ class TopologyGrammarState:
     def _has_existing_insert_container(self) -> bool:
         return any(role in {"ROLE_SUPPORT", "ROLE_INSERT_GROUP"} for role in self.node_roles[: int(self.node_index)])
 
+    def count_prior_key(self) -> str | None:
+        if self.phase == "node_count":
+            return "node_count"
+        if self.phase == "child_count":
+            return "child_count"
+        if self.phase == "pair_count":
+            block_name = self._current_pair_block_name()
+            if block_name in {"REL_BLOCK_DIVIDES", "REL_BLOCK_ADJACENT_TO"}:
+                return str(block_name)
+        return None
+
     @staticmethod
     def _int_tokens(low: int, high: int) -> List[str]:
         if high < low:
@@ -432,12 +445,18 @@ def _sample_from_logits(
     allowed_ids: Sequence[int],
     temperature: float,
     top_k: int | None,
+    logit_bias: Mapping[int, float] | None = None,
 ) -> int:
     if not allowed_ids:
         raise ValueError("allowed_ids must not be empty")
     allowed = torch.tensor(list(allowed_ids), dtype=torch.long, device=logits.device)
     masked = torch.full_like(logits, float("-inf"))
     masked.index_copy_(0, allowed, logits.index_select(0, allowed))
+    if logit_bias:
+        for token_id, bias in logit_bias.items():
+            token_id = int(token_id)
+            if 0 <= token_id < int(masked.numel()):
+                masked[token_id] = masked[token_id] + float(bias)
     if temperature <= 0.0:
         return int(torch.argmax(masked).item())
     masked = masked / float(temperature)
@@ -448,6 +467,51 @@ def _sample_from_logits(
         masked = masked.masked_fill(masked < threshold, float("-inf"))
     probs = F.softmax(masked, dim=-1)
     return int(torch.multinomial(probs, num_samples=1).item())
+
+
+def _normalize_count_priors(count_priors: Mapping[str, object] | None) -> Dict[str, Dict[int, float]]:
+    if not count_priors:
+        return {}
+    source = count_priors.get("priors") if isinstance(count_priors, Mapping) else None
+    if isinstance(source, Mapping):
+        count_priors = source  # type: ignore[assignment]
+    elif isinstance(count_priors.get("histograms"), Mapping):
+        count_priors = count_priors["histograms"]  # type: ignore[index,assignment]
+    output: Dict[str, Dict[int, float]] = {}
+    for key, value in dict(count_priors).items():
+        if str(key) not in COUNT_PRIOR_KEYS or not isinstance(value, Mapping):
+            continue
+        counts = {int(inner_key): float(inner_value) for inner_key, inner_value in dict(value).items()}
+        total = float(sum(counts.values()))
+        if total > 0.0:
+            output[str(key)] = {int(inner_key): float(inner_value / total) for inner_key, inner_value in counts.items()}
+    return output
+
+
+def _count_prior_logit_bias(
+    *,
+    state: TopologyGrammarState,
+    allowed_tokens: Sequence[str],
+    vocab: Mapping[str, int],
+    count_priors: Mapping[str, Mapping[int, float]],
+    weight: float,
+    smoothing: float,
+) -> Dict[int, float]:
+    if float(weight) == 0.0:
+        return {}
+    key = state.count_prior_key()
+    if key is None or key not in count_priors:
+        return {}
+    prior = count_priors[key]
+    smoothing_value = max(float(smoothing), 1e-12)
+    output: Dict[int, float] = {}
+    for token in allowed_tokens:
+        if not str(token).startswith("I_") or token not in vocab:
+            continue
+        count = int(token_int(str(token)))
+        probability = max(float(prior.get(count, smoothing_value)), smoothing_value)
+        output[int(vocab[str(token)])] = float(weight) * math.log(probability)
+    return output
 
 
 @torch.no_grad()
@@ -461,6 +525,9 @@ def sample_topology_constrained(
     constraint_config: TopologyConstrainedSamplerConfig | None = None,
     device: torch.device | str | None = None,
     use_cache: bool = True,
+    count_priors: Mapping[str, object] | None = None,
+    count_prior_weight: float = 0.0,
+    count_prior_smoothing: float = 1e-6,
 ) -> Dict[str, object]:
     constraint_config = constraint_config or TopologyConstrainedSamplerConfig()
     inverse_vocab = {int(index): str(token) for token, index in vocab.items()}
@@ -468,6 +535,7 @@ def sample_topology_constrained(
         raise ValueError("vocab must contain <BOS> and <EOS>")
     device = torch.device(device) if device is not None else next(model.parameters()).device
     state = TopologyGrammarState(config=constraint_config)
+    normalized_count_priors = _normalize_count_priors(count_priors)
     ids = [int(vocab["<BOS>"])]
     tokens = ["<BOS>"]
     stopped_reason = "max_new_tokens"
@@ -492,7 +560,21 @@ def sample_topology_constrained(
             input_ids = torch.tensor([ids[-int(block_size) :]], dtype=torch.long, device=device)
             outputs = model(input_ids)
         logits = outputs["logits"][0, -1, :]
-        next_id = _sample_from_logits(logits, allowed_ids=allowed_ids, temperature=temperature, top_k=top_k)
+        logit_bias = _count_prior_logit_bias(
+            state=state,
+            allowed_tokens=allowed_tokens,
+            vocab=vocab,
+            count_priors=normalized_count_priors,
+            weight=float(count_prior_weight),
+            smoothing=float(count_prior_smoothing),
+        )
+        next_id = _sample_from_logits(
+            logits,
+            allowed_ids=allowed_ids,
+            temperature=temperature,
+            top_k=top_k,
+            logit_bias=logit_bias,
+        )
         next_token = inverse_vocab.get(int(next_id), "<UNK>")
         ids.append(int(next_id))
         tokens.append(next_token)
@@ -509,4 +591,10 @@ def sample_topology_constrained(
         "hit_eos": hit_eos,
         "stopped_reason": stopped_reason,
         "constraint_diagnostics": state.diagnostics(),
+        "count_prior_diagnostics": {
+            "enabled": bool(normalized_count_priors and float(count_prior_weight) != 0.0),
+            "weight": float(count_prior_weight),
+            "smoothing": float(count_prior_smoothing),
+            "keys": sorted(normalized_count_priors.keys()),
+        },
     }
