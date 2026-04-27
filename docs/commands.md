@@ -310,6 +310,22 @@ conda run -n lmf python scripts/evaluate_manual_topology_ar.py `
   --count-prior-weight 0.5
 ```
 
+For a simpler diagnostic knob, use the experimental high-count tilt. This keeps the same semantic constraints and
+only biases count decisions upward.
+
+```powershell
+conda run -n lmf python scripts/evaluate_manual_topology_ar.py `
+  --checkpoint outputs/manual_topology_ar/topology_v1/ckpt_iter_5000.pt `
+  --output-json outputs/manual_topology_ar/topology_v1/eval_iter5000_complexity_t0.9.json `
+  --summary-md outputs/manual_topology_ar/topology_v1/eval_iter5000_complexity_t0.9.md `
+  --output-samples outputs/manual_topology_ar/topology_v1/samples_iter5000_complexity_t0.9.jsonl `
+  --num-samples 100 `
+  --temperature 0.9 `
+  --top-k 50 `
+  --constrained `
+  --complexity-level 1.0
+```
+
 ## Historical Commands
 
 Training and sampling commands for topology, geometry, boundary, and pair-boundary models still exist under `scripts/`.

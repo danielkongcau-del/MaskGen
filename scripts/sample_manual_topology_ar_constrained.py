@@ -47,6 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--count-prior-output", type=Path, default=None)
     parser.add_argument("--count-prior-weight", type=float, default=0.0)
     parser.add_argument("--count-prior-smoothing", type=float, default=1e-6)
+    parser.add_argument("--complexity-level", type=float, default=0.0)
     parser.add_argument("--validate", action="store_true")
     return parser.parse_args()
 
@@ -120,6 +121,7 @@ def main() -> None:
                 count_priors=count_prior,
                 count_prior_weight=float(args.count_prior_weight),
                 count_prior_smoothing=float(args.count_prior_smoothing),
+                complexity_level=float(args.complexity_level),
             )
             validation = validate_topology_tokens(sample["tokens"]) if bool(args.validate) else None
             if validation and validation["valid"]:
@@ -141,6 +143,7 @@ def main() -> None:
                 "semantic_validation_errors": [] if validation is None else list(validation["semantic_errors"]),
                 "constraint_diagnostics": sample["constraint_diagnostics"],
                 "count_prior_diagnostics": sample["count_prior_diagnostics"],
+                "complexity_diagnostics": sample["complexity_diagnostics"],
                 "sampling_config": {
                     "max_new_tokens": int(args.max_new_tokens),
                     "temperature": float(args.temperature),
@@ -151,6 +154,7 @@ def main() -> None:
                     "count_prior_weight": float(args.count_prior_weight),
                     "count_prior_smoothing": float(args.count_prior_smoothing),
                     "count_prior_source": None if count_prior is None else count_prior.get("source"),
+                    "complexity_level": float(args.complexity_level),
                 },
             }
             rows.append(row)

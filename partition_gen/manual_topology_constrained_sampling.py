@@ -514,6 +514,40 @@ def _count_prior_logit_bias(
     return output
 
 
+def _complexity_logit_bias(
+    *,
+    state: TopologyGrammarState,
+    allowed_tokens: Sequence[str],
+    vocab: Mapping[str, int],
+    complexity_level: float,
+) -> Dict[int, float]:
+    if float(complexity_level) == 0.0 or state.count_prior_key() is None:
+        return {}
+    count_tokens = [str(token) for token in allowed_tokens if str(token).startswith("I_") and str(token) in vocab]
+    if not count_tokens:
+        return {}
+    counts = [int(token_int(token)) for token in count_tokens]
+    max_count = max(counts)
+    if max_count <= 0:
+        return {}
+    denominator = math.log1p(float(max_count))
+    if denominator <= 0.0:
+        return {}
+    return {
+        int(vocab[token]): float(complexity_level) * (math.log1p(float(count)) / denominator)
+        for token, count in zip(count_tokens, counts)
+    }
+
+
+def _merge_logit_biases(*biases: Mapping[int, float]) -> Dict[int, float]:
+    output: Dict[int, float] = {}
+    for bias in biases:
+        for token_id, value in bias.items():
+            token_id = int(token_id)
+            output[token_id] = float(output.get(token_id, 0.0) + float(value))
+    return output
+
+
 @torch.no_grad()
 def sample_topology_constrained(
     model,
@@ -528,6 +562,7 @@ def sample_topology_constrained(
     count_priors: Mapping[str, object] | None = None,
     count_prior_weight: float = 0.0,
     count_prior_smoothing: float = 1e-6,
+    complexity_level: float = 0.0,
 ) -> Dict[str, object]:
     constraint_config = constraint_config or TopologyConstrainedSamplerConfig()
     inverse_vocab = {int(index): str(token) for token, index in vocab.items()}
@@ -560,13 +595,21 @@ def sample_topology_constrained(
             input_ids = torch.tensor([ids[-int(block_size) :]], dtype=torch.long, device=device)
             outputs = model(input_ids)
         logits = outputs["logits"][0, -1, :]
-        logit_bias = _count_prior_logit_bias(
-            state=state,
-            allowed_tokens=allowed_tokens,
-            vocab=vocab,
-            count_priors=normalized_count_priors,
-            weight=float(count_prior_weight),
-            smoothing=float(count_prior_smoothing),
+        logit_bias = _merge_logit_biases(
+            _count_prior_logit_bias(
+                state=state,
+                allowed_tokens=allowed_tokens,
+                vocab=vocab,
+                count_priors=normalized_count_priors,
+                weight=float(count_prior_weight),
+                smoothing=float(count_prior_smoothing),
+            ),
+            _complexity_logit_bias(
+                state=state,
+                allowed_tokens=allowed_tokens,
+                vocab=vocab,
+                complexity_level=float(complexity_level),
+            ),
         )
         next_id = _sample_from_logits(
             logits,
@@ -596,5 +639,9 @@ def sample_topology_constrained(
             "weight": float(count_prior_weight),
             "smoothing": float(count_prior_smoothing),
             "keys": sorted(normalized_count_priors.keys()),
+        },
+        "complexity_diagnostics": {
+            "enabled": bool(float(complexity_level) != 0.0),
+            "level": float(complexity_level),
         },
     }

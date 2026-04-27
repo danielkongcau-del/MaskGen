@@ -331,6 +331,7 @@ def sample_model_topology_rows(
     count_priors: dict | None = None,
     count_prior_weight: float = 0.0,
     count_prior_smoothing: float = 1e-6,
+    complexity_level: float = 0.0,
     progress_every: int = 0,
     progress_label: str = "topology_sample",
 ) -> List[dict]:
@@ -360,6 +361,7 @@ def sample_model_topology_rows(
                         count_priors=count_priors,
                         count_prior_weight=float(count_prior_weight),
                         count_prior_smoothing=float(count_prior_smoothing),
+                        complexity_level=float(complexity_level),
                     )
                     row = {
                         "format": "maskgen_manual_topology_ar_sample_v1",
@@ -371,6 +373,7 @@ def sample_model_topology_rows(
                         "tokens": list(sample["tokens"]),
                         "constraint_diagnostics": sample["constraint_diagnostics"],
                         "count_prior_diagnostics": sample["count_prior_diagnostics"],
+                        "complexity_diagnostics": sample["complexity_diagnostics"],
                     }
                 else:
                     start = torch.tensor([[bos_id]], dtype=torch.long, device=device)
@@ -414,6 +417,7 @@ def evaluate_model_topology_samples(
     count_priors: dict | None = None,
     count_prior_weight: float = 0.0,
     count_prior_smoothing: float = 1e-6,
+    complexity_level: float = 0.0,
     top_k_invalid: int = 20,
     progress_every: int = 0,
     progress_label: str = "topology_eval_sample",
@@ -430,6 +434,7 @@ def evaluate_model_topology_samples(
         count_priors=count_priors,
         count_prior_weight=float(count_prior_weight),
         count_prior_smoothing=float(count_prior_smoothing),
+        complexity_level=float(complexity_level),
         progress_every=int(progress_every),
         progress_label=progress_label,
     )
@@ -444,6 +449,7 @@ def evaluate_model_topology_samples(
         "count_prior_enabled": bool(count_priors and float(count_prior_weight) != 0.0),
         "count_prior_weight": float(count_prior_weight),
         "count_prior_smoothing": float(count_prior_smoothing),
+        "complexity_level": float(complexity_level),
     }
     return summary
 

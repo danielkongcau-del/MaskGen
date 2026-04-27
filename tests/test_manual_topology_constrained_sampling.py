@@ -241,6 +241,25 @@ class ManualTopologyConstrainedSamplingTest(unittest.TestCase):
         self.assertTrue(result["semantic_valid"], result["semantic_errors"])
         self.assertEqual(result["node_count_declared"], 2)
 
+    def test_complexity_level_biases_allowed_count_tokens(self) -> None:
+        vocab = build_token_vocabulary(ParseGraphTokenizerConfig())
+        model = _BadLogitModel(len(vocab), invalid_id=vocab["<EOS>"])
+        sample = sample_topology_constrained(
+            model,
+            vocab,
+            max_new_tokens=128,
+            temperature=0.0,
+            top_k=None,
+            constraint_config=TopologyConstrainedSamplerConfig(max_nodes=2, max_label=1, max_relation_pairs=0),
+            device=torch.device("cpu"),
+            complexity_level=10.0,
+        )
+        result = validate_topology_tokens(sample["tokens"])
+        self.assertTrue(result["valid"], result["errors"])
+        self.assertTrue(result["semantic_valid"], result["semantic_errors"])
+        self.assertEqual(result["node_count_declared"], 2)
+        self.assertTrue(sample["complexity_diagnostics"]["enabled"])
+
     def test_illegal_step_records_error(self) -> None:
         state = TopologyGrammarState()
         self.assertFalse(state.step("<EOS>"))
