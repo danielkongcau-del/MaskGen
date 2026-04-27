@@ -4,10 +4,9 @@ import json
 from pathlib import Path
 
 from partition_gen.manual_split_validator import validate_topology_geometry_split
-from partition_gen.manual_target_split import build_topology_geometry_split_targets, merge_topology_geometry_targets
+from partition_gen.manual_target_split import build_topology_geometry_split_targets
 from partition_gen.parse_graph_compact_tokenizer import (
     compact_tokenizer_diagnostics,
-    decode_topology_tokens_to_target,
     encode_generator_target_compact,
     encode_geometry_target,
     encode_topology_target,
@@ -169,50 +168,6 @@ class ManualCompactTokenizerTests(unittest.TestCase):
         geometry_max = max(len(encode_geometry_target(target)) for target in geometry_targets)
 
         self.assertGreater(old_total, max(topology_tokens, geometry_max))
-
-    def test_decode_topology_tokens_to_target_roundtrips_structure(self):
-        support = _polygon_node("support_0", label=0)
-        insert = _polygon_node("insert_0", role="insert_object", label=1)
-        group = {
-            "id": "insert_group_0",
-            "role": "insert_object_group",
-            "label": 1,
-            "geometry_model": "none",
-            "renderable": False,
-            "children": ["insert_0"],
-        }
-        target = _target(
-            [support, group, insert],
-            [
-                {"type": "inserted_in", "object": "insert_group_0", "container": "support_0"},
-                {"type": "contains", "parent": "insert_group_0", "child": "insert_0"},
-                {"type": "adjacent_to", "faces": ["support_0", "insert_0"]},
-            ],
-        )
-        topology_target, _geometry_targets, _diagnostics = build_topology_geometry_split_targets(target)
-        tokens = encode_topology_target(topology_target)
-
-        decoded = decode_topology_tokens_to_target(tokens)
-
-        self.assertEqual(decoded["target_type"], "manual_parse_graph_topology_v1")
-        self.assertEqual(encode_topology_target(decoded), tokens)
-        nodes_by_id = {node["id"]: node for node in decoded["parse_graph"]["nodes"]}
-        self.assertEqual(nodes_by_id["support_0"]["geometry_ref"], "support_0")
-        self.assertEqual(nodes_by_id["insert_group_0"]["children"], ["insert_0"])
-        self.assertTrue(any(relation["type"] == "contains" for relation in decoded["parse_graph"]["relations"]))
-
-    def test_merge_topology_geometry_targets_restores_geometry_payload(self):
-        target = _target([_polygon_node("support_0", label=0)])
-        topology_target, geometry_targets, _diagnostics = build_topology_geometry_split_targets(target)
-
-        merged = merge_topology_geometry_targets(topology_target, geometry_targets)
-
-        node = merged["parse_graph"]["nodes"][0]
-        self.assertEqual(merged["target_type"], "parse_graph")
-        self.assertNotIn("geometry_ref", node)
-        self.assertIn("frame", node)
-        self.assertIn("geometry", node)
-        self.assertEqual(merged["metadata"]["attached_geometry_count"], 1)
 
     def test_old_tokenizer_still_available(self):
         target = _target([_polygon_node("support_0")])

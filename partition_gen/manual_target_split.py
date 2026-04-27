@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from typing import Dict, List, Sequence
+from typing import Dict, List
 
 
 def _is_renderable_geometry_node(node: dict) -> bool:
@@ -125,90 +125,3 @@ def build_topology_geometry_split_targets(
         "reference_only_count": int(sum(1 for node in nodes if bool(node.get("is_reference_only", False)))),
     }
     return topology_target, geometry_targets, diagnostics
-
-
-def _geometry_targets_by_source_node_id(geometry_targets: Sequence[dict]) -> Dict[str, dict]:
-    return {
-        str(target.get("source_node_id")): target
-        for target in geometry_targets
-        if target.get("source_node_id") is not None
-    }
-
-
-def _relation_contains_pairs(relations: Sequence[dict]) -> set[tuple[str, str]]:
-    return {
-        (str(relation.get("parent")), str(relation.get("child")))
-        for relation in relations
-        if str(relation.get("type")) == "contains"
-        and relation.get("parent") is not None
-        and relation.get("child") is not None
-    }
-
-
-def merge_topology_geometry_targets(
-    topology_target: dict,
-    geometry_targets: Sequence[dict],
-    *,
-    require_all_geometry: bool = True,
-) -> dict:
-    """Rebuild a full manual parse graph target from split topology and geometry targets."""
-
-    graph = topology_target.get("parse_graph", {}) or {}
-    geometry_by_ref = _geometry_targets_by_source_node_id(geometry_targets)
-    nodes: List[dict] = []
-    missing_geometry_refs: List[str] = []
-    consumed_geometry_refs: set[str] = set()
-
-    for node in graph.get("nodes", []) or []:
-        merged_node = copy.deepcopy(node)
-        geometry_ref = merged_node.pop("geometry_ref", None)
-        if geometry_ref:
-            ref = str(geometry_ref)
-            geometry_target = geometry_by_ref.get(ref)
-            if geometry_target is None:
-                missing_geometry_refs.append(ref)
-            else:
-                consumed_geometry_refs.add(ref)
-                merged_node["geometry_model"] = copy.deepcopy(geometry_target.get("geometry_model", merged_node.get("geometry_model")))
-                if "frame" in geometry_target:
-                    merged_node["frame"] = copy.deepcopy(geometry_target["frame"])
-                if "geometry" in geometry_target:
-                    merged_node["geometry"] = copy.deepcopy(geometry_target["geometry"])
-                if "atoms" in geometry_target:
-                    merged_node["atoms"] = copy.deepcopy(geometry_target["atoms"])
-        nodes.append(merged_node)
-
-    if require_all_geometry and missing_geometry_refs:
-        raise ValueError(f"Missing geometry targets for refs: {', '.join(missing_geometry_refs)}")
-
-    relations = copy.deepcopy(list(graph.get("relations", []) or []))
-    contains_pairs = _relation_contains_pairs(relations)
-    for node in nodes:
-        if str(node.get("role")) != "insert_object_group":
-            continue
-        parent = str(node.get("id"))
-        for child in node.get("children", []) or []:
-            pair = (parent, str(child))
-            if pair not in contains_pairs:
-                relations.append({"type": "contains", "parent": parent, "child": str(child)})
-                contains_pairs.add(pair)
-
-    return {
-        "format": "maskgen_generator_target_v1",
-        "target_type": "parse_graph",
-        "size": copy.deepcopy(topology_target.get("size", [0, 0])),
-        "parse_graph": {
-            "nodes": nodes,
-            "relations": relations,
-            "residuals": copy.deepcopy(list(graph.get("residuals", []) or [])),
-        },
-        "metadata": {
-            "merged_from_topology_geometry_split": True,
-            "split_profile": "topology_geometry_v1",
-            "topology_target_type": topology_target.get("target_type"),
-            "geometry_target_count": int(len(geometry_targets)),
-            "attached_geometry_count": int(len(consumed_geometry_refs)),
-            "missing_geometry_ref_ids": missing_geometry_refs,
-            "extra_geometry_target_ids": sorted(ref for ref in geometry_by_ref if ref not in consumed_geometry_refs),
-        },
-    }

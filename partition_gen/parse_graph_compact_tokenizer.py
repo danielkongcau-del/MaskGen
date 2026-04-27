@@ -5,7 +5,6 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 from partition_gen.parse_graph_relations import divides_target, inserted_in_container, relation_refs
 from partition_gen.parse_graph_tokenizer import (
     ParseGraphTokenizerConfig,
-    TokenReader,
     _encode_frame,
     _encode_manual_convex_atoms,
     _encode_manual_polygon_geometry,
@@ -15,40 +14,6 @@ from partition_gen.parse_graph_tokenizer import (
     encode_generator_target,
     int_token,
 )
-
-
-_ROLE_TOKEN_TO_MANUAL_ROLE = {
-    "ROLE_SUPPORT": "support_region",
-    "ROLE_DIVIDER": "divider_region",
-    "ROLE_INSERT": "insert_object",
-    "ROLE_INSERT_GROUP": "insert_object_group",
-    "ROLE_RESIDUAL": "residual_region",
-    "ROLE_UNKNOWN": "unknown",
-}
-
-_MANUAL_ROLE_TO_ID_PREFIX = {
-    "support_region": "support",
-    "divider_region": "divider",
-    "insert_object": "insert",
-    "insert_object_group": "insert_group",
-    "residual_region": "residual",
-    "unknown": "node",
-}
-
-_GEOMETRY_TOKEN_TO_MODEL = {
-    "GEOM_NONE": "none",
-    "GEOM_POLYGON_CODE": "polygon_code",
-    "GEOM_CONVEX_ATOMS": "convex_atoms",
-    "GEOM_UNKNOWN": "unknown",
-}
-
-_RELATION_TOKEN_TO_TYPE = {
-    "REL_INSERTED_IN": "inserted_in",
-    "REL_CONTAINS": "contains",
-    "REL_DIVIDES": "divides",
-    "REL_ADJACENT_TO": "adjacent_to",
-    "REL_UNKNOWN": "unknown",
-}
 
 
 def _node_index_by_id(nodes: Sequence[dict]) -> Dict[str, int]:
@@ -287,151 +252,6 @@ def encode_topology_target(
     tokens.extend(relation_tokens)
     tokens.extend(["RESIDUALS", int_token(len(graph.get("residuals", [])), config=config), "<EOS>"])
     return tokens
-
-
-def _generated_node_id(role: str, role_counts: Dict[str, int]) -> str:
-    prefix = _MANUAL_ROLE_TO_ID_PREFIX.get(str(role), "node")
-    index = int(role_counts.get(prefix, 0))
-    role_counts[prefix] = index + 1
-    return f"{prefix}_{index}"
-
-
-def _node_id_for_index(node_ids: Sequence[str], index: int) -> str:
-    if index < 0 or index >= len(node_ids):
-        raise ValueError(f"Node index {index} is out of range for {len(node_ids)} decoded nodes")
-    return str(node_ids[int(index)])
-
-
-def _decode_topology_pair_block(reader: TokenReader, block_name: str, node_ids: Sequence[str]) -> List[tuple[str, str]]:
-    reader.expect(block_name)
-    pair_count = reader.next_int()
-    pairs: List[tuple[str, str]] = []
-    for _pair_index in range(int(pair_count)):
-        left = _node_id_for_index(node_ids, reader.next_int())
-        right = _node_id_for_index(node_ids, reader.next_int())
-        pairs.append((left, right))
-    reader.expect("END_BLOCK")
-    return pairs
-
-
-def decode_topology_tokens_to_target(tokens: Sequence[str]) -> dict:
-    """Decode a `MANUAL_TOPOLOGY_V1` token sequence into a topology target JSON.
-
-    The topology tokenizer stores only a binary geometry-reference flag. During
-    decoding, a non-zero flag becomes `geometry_ref=<decoded node id>`, which is
-    the convention expected by the split geometry targets and merge helper.
-    """
-
-    reader = TokenReader(tokens)
-    reader.expect("<BOS>")
-    reader.expect("MANUAL_TOPOLOGY_V1")
-    reader.expect("SIZE")
-    size = [reader.next_int(), reader.next_int()]
-    reader.expect("NODE_BLOCK")
-    node_count = reader.next_int()
-
-    nodes: List[dict] = []
-    node_ids: List[str] = []
-    role_counts: Dict[str, int] = {}
-    child_indices_by_node_id: Dict[str, List[int]] = {}
-
-    for _node_index in range(int(node_count)):
-        reader.expect("NODE")
-        role_token = reader.next()
-        role = _ROLE_TOKEN_TO_MANUAL_ROLE.get(role_token, "unknown")
-        node_id = _generated_node_id(role, role_counts)
-        label = reader.next_int()
-        renderable = bool(reader.next_int())
-        is_reference_only = bool(reader.next_int())
-        geometry_token = reader.next()
-        geometry_model = _GEOMETRY_TOKEN_TO_MODEL.get(geometry_token, "unknown")
-        geometry_ref_flag = reader.next_int()
-        node = {
-            "id": node_id,
-            "role": role,
-            "label": int(label),
-            "renderable": renderable,
-            "is_reference_only": is_reference_only,
-            "geometry_model": geometry_model,
-        }
-        if geometry_ref_flag:
-            node["geometry_ref"] = node_id
-        if reader.index < len(reader.tokens) and reader.tokens[reader.index] == "CHILDREN":
-            reader.expect("CHILDREN")
-            child_count = reader.next_int()
-            child_indices = [reader.next_int() for _child_index in range(int(child_count))]
-            child_indices_by_node_id[node_id] = [int(index) for index in child_indices]
-        reader.expect("END_NODE")
-        nodes.append(node)
-        node_ids.append(node_id)
-
-    for node in nodes:
-        child_indices = child_indices_by_node_id.get(str(node["id"]))
-        if child_indices is not None:
-            node["children"] = [_node_id_for_index(node_ids, int(index)) for index in child_indices]
-            node["count"] = int(len(node["children"]))
-
-    relations: List[dict] = []
-    for node in nodes:
-        if str(node.get("role")) == "insert_object_group":
-            for child_id in node.get("children", []) or []:
-                relations.append({"type": "contains", "parent": node["id"], "child": str(child_id)})
-
-    for object_id, container_id in _decode_topology_pair_block(reader, "REL_BLOCK_INSERTED_IN", node_ids):
-        relations.append(
-            {
-                "type": "inserted_in",
-                "object": object_id,
-                "container": container_id,
-                "support": container_id,
-            }
-        )
-    for divider_id, target_id in _decode_topology_pair_block(reader, "REL_BLOCK_DIVIDES", node_ids):
-        relations.append(
-            {
-                "type": "divides",
-                "divider": divider_id,
-                "target": target_id,
-                "support": target_id,
-            }
-        )
-    for left_id, right_id in _decode_topology_pair_block(reader, "REL_BLOCK_ADJACENT_TO", node_ids):
-        relations.append({"type": "adjacent_to", "faces": [left_id, right_id]})
-
-    reader.expect("REL_BLOCK_OTHER")
-    other_count = reader.next_int()
-    for _relation_index in range(int(other_count)):
-        relation_token = reader.next()
-        ref_count = reader.next_int()
-        refs = [_node_id_for_index(node_ids, reader.next_int()) for _ref_index in range(int(ref_count))]
-        relations.append(
-            {
-                "type": _RELATION_TOKEN_TO_TYPE.get(relation_token, "unknown"),
-                "refs": refs,
-            }
-        )
-    reader.expect("END_BLOCK")
-    reader.expect("RESIDUALS")
-    residual_count = reader.next_int()
-    residuals = [{"reason": "tokenized_residual_placeholder"} for _ in range(int(residual_count))]
-    reader.expect("<EOS>")
-    if reader.index != len(reader.tokens):
-        raise ValueError(f"Trailing tokens after EOS: {len(reader.tokens) - reader.index}")
-
-    return {
-        "format": "maskgen_generator_target_v1",
-        "target_type": "manual_parse_graph_topology_v1",
-        "size": size,
-        "parse_graph": {
-            "nodes": nodes,
-            "relations": relations,
-            "residuals": residuals,
-        },
-        "metadata": {
-            "decoded_from_tokens": True,
-            "tokenizer": "manual_topology_v1",
-        },
-    }
 
 
 def encode_geometry_target(
