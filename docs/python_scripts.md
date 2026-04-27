@@ -178,6 +178,18 @@ Attaches retrieved real geometry targets to generated manual topology samples as
 
 It decodes semantic-valid `MANUAL_TOPOLOGY_V1` sample rows into topology targets, samples placeholder geometry from a manual split dataset by `(role, label, geometry_model)` with fallbacks, and writes full `parse_graph` JSONs plus a manifest and summary. The output is diagnostic, not final generation quality, because geometry is retrieved independently of the generated topology.
 
+### `scripts/audit_manual_parse_graph_targets.py`
+
+Audits full manual `parse_graph` targets, including placeholder-geometry outputs.
+
+It resolves a single JSON, a `graphs/` directory, or an output root with `manifest.jsonl`, then checks whether each target can be re-encoded by both the legacy manual tokenizer and compact manual tokenizer. It also reports missing renderable geometry payloads, node/relation statistics, token-length statistics, and role/label histograms.
+
+### `scripts/visualize_manual_parse_graph_target.py`
+
+Renders full manual `parse_graph` targets to PNG.
+
+It draws renderable `polygon_code` nodes by applying each node's `frame` transform to local polygon vertices. This is intended for quick qualitative checks of placeholder-geometry outputs and future geometry-generator outputs.
+
 ### `scripts/summarize_weak_explainer_benchmark.py`
 
 Summarizes a weak explainer benchmark JSONL into Markdown or JSON.
