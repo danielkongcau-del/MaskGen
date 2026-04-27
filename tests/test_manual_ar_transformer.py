@@ -56,6 +56,28 @@ class ManualARTransformerTest(unittest.TestCase):
         self.assertLessEqual(generated.shape[1], 6)
         self.assertEqual(int(generated[0, 0].item()), 1)
 
+    def test_cached_forward_matches_full_forward_logits(self) -> None:
+        model = self.make_model()
+        model.eval()
+        input_ids = torch.randint(0, 32, (1, 8), dtype=torch.long)
+        full_logits = model(input_ids=input_ids)["logits"]
+        past_kv = None
+        cached_logits = []
+        for index in range(input_ids.size(1)):
+            outputs = model(input_ids=input_ids[:, index : index + 1], past_kv=past_kv, use_cache=True)
+            past_kv = outputs["past_kv"]
+            cached_logits.append(outputs["logits"])
+        cached = torch.cat(cached_logits, dim=1)
+        self.assertTrue(torch.allclose(full_logits, cached, atol=1e-5, rtol=1e-5))
+
+    def test_cached_greedy_generate_matches_uncached_generate(self) -> None:
+        model = self.make_model()
+        model.eval()
+        start = torch.tensor([[1]], dtype=torch.long)
+        cached = model.generate(start.clone(), max_new_tokens=5, temperature=0.0, use_cache=True)
+        uncached = model.generate(start.clone(), max_new_tokens=5, temperature=0.0, use_cache=False)
+        self.assertTrue(torch.equal(cached, uncached))
+
     def test_checkpoint_save_load(self) -> None:
         model = self.make_model()
         optimizer = build_optimizer(

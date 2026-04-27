@@ -287,6 +287,7 @@ def sample_topology_constrained(
     top_k: int | None = None,
     constraint_config: TopologyConstrainedSamplerConfig | None = None,
     device: torch.device | str | None = None,
+    use_cache: bool = True,
 ) -> Dict[str, object]:
     constraint_config = constraint_config or TopologyConstrainedSamplerConfig()
     inverse_vocab = {int(index): str(token) for token, index in vocab.items()}
@@ -297,6 +298,11 @@ def sample_topology_constrained(
     ids = [int(vocab["<BOS>"])]
     tokens = ["<BOS>"]
     stopped_reason = "max_new_tokens"
+    block_size = int(getattr(model.config, "block_size", max_new_tokens + 1))
+    use_kv_cache = bool(
+        use_cache and getattr(model, "supports_kv_cache", False) and int(max_new_tokens) + 1 <= int(block_size)
+    )
+    past_kv = None
 
     for _step in range(int(max_new_tokens)):
         allowed_tokens = state.allowed_token_strings()
@@ -305,8 +311,14 @@ def sample_topology_constrained(
             state.errors.append(f"empty_allowed_set_phase_{state.phase}")
             stopped_reason = "empty_allowed_set"
             break
-        input_ids = torch.tensor([ids[-int(getattr(model.config, "block_size", len(ids))) :]], dtype=torch.long, device=device)
-        logits = model(input_ids)["logits"][0, -1, :]
+        if use_kv_cache:
+            input_ids = torch.tensor([[ids[-1]]], dtype=torch.long, device=device)
+            outputs = model(input_ids, past_kv=past_kv, use_cache=True)
+            past_kv = outputs["past_kv"]
+        else:
+            input_ids = torch.tensor([ids[-int(block_size) :]], dtype=torch.long, device=device)
+            outputs = model(input_ids)
+        logits = outputs["logits"][0, -1, :]
         next_id = _sample_from_logits(logits, allowed_ids=allowed_ids, temperature=temperature, top_k=top_k)
         next_token = inverse_vocab.get(int(next_id), "<UNK>")
         ids.append(int(next_id))
