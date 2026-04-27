@@ -172,6 +172,18 @@ Samples a manual topology AR checkpoint and writes validity plus structural-dist
 
 It supports both unconstrained and constrained sampling. The constrained sampler enforces the token grammar plus topology semantics by default: insert-group children reserve future `ROLE_INSERT` nodes, relation endpoints are role-filtered, and duplicate/self relation pairs are masked. Optional `--count-prior-token-root` or `--count-prior-json` plus `--count-prior-weight` blends training-set count priors into `node_count`, insert-group `child_count`, `REL_BLOCK_DIVIDES` count, and `REL_BLOCK_ADJACENT_TO` count logits without changing the allowed token set. Experimental `--complexity-level` applies a single monotonic high-count tilt to those same count decisions for diagnostics. The summary includes grammar valid rate, semantic-valid rate, EOS count, node-count stats, role/label histograms, role-label histogram, relation means per valid sample, and invalid failure reasons.
 
+### `scripts/train_manual_geometry_ar.py`
+
+Trains the per-node manual geometry AR Transformer on `manual_parse_graph_geometry_v1` token sequences.
+
+It reuses the same AR Transformer and manual split token dataloader as topology training, but reads `geometry_sequences.jsonl`. Optional `--geometry-eval-samples` runs constrained forced-prefix sampling during training, using validation geometry rows to provide `(role, label, geometry_model)` prefixes and sampling the `FRAME` / geometry payload suffix.
+
+### `scripts/evaluate_manual_geometry_ar.py`
+
+Samples a manual geometry AR checkpoint and writes validity metrics for generated `MANUAL_GEOMETRY_V1` sequences.
+
+By default it uses constrained sampling with forced prefixes from a geometry token root, then validates decode/re-encode roundtrips, EOS rate, polygon counts, hole counts, atom counts, point counts, and role/label/model histograms. If no token root is available, it can sample from an explicit `--prefix-role`, `--prefix-label`, and `--prefix-geometry-model`.
+
 ### `scripts/attach_placeholder_geometry_to_topology_samples.py`
 
 Attaches retrieved real geometry targets to generated manual topology samples as a downstream smoke test before a learned geometry generator exists.

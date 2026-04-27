@@ -131,10 +131,11 @@ def save_checkpoint(
     best_topology_valid_rate: float | None = None,
     best_topology_structure_score: float | None = None,
     metrics: Dict[str, object] | None = None,
+    checkpoint_format: str = "maskgen_manual_topology_ar_checkpoint_v1",
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint = {
-        "format": "maskgen_manual_topology_ar_checkpoint_v1",
+        "format": str(checkpoint_format),
         "model_config": model_config.to_dict(),
         "model": model.state_dict(),
         "optimizer": None if optimizer is None else optimizer.state_dict(),
