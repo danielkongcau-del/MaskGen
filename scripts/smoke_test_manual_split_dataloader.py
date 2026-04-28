@@ -14,7 +14,7 @@ from partition_gen.manual_split_token_dataset import build_manual_split_token_da
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Smoke-test manual split token PyTorch dataloader.")
     parser.add_argument("--token-root", type=Path, required=True)
-    parser.add_argument("--sequence-kind", choices=["topology", "geometry"], default="topology")
+    parser.add_argument("--sequence-kind", choices=["topology", "geometry", "conditioned_geometry"], default="topology")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--max-length", type=int, default=None)
     return parser.parse_args()

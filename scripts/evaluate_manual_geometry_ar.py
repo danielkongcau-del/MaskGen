@@ -14,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from partition_gen.manual_ar_training import load_checkpoint  # noqa: E402
+from partition_gen.manual_geometry_conditioned_evaluation import sample_model_conditioned_geometry_rows  # noqa: E402
 from partition_gen.manual_geometry_constrained_sampling import GeometryConstrainedSamplerConfig  # noqa: E402
 from partition_gen.manual_geometry_evaluation import (  # noqa: E402
     evaluate_geometry_sample_rows,
@@ -32,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--summary-md", type=Path, required=True)
     parser.add_argument("--output-samples", type=Path, default=None)
     parser.add_argument("--token-root", type=Path, default=None, help="Optional token root used to source forced geometry prefixes.")
+    parser.add_argument("--sequence-kind", type=str, default="auto", choices=["auto", "geometry", "conditioned_geometry"])
     parser.add_argument("--num-samples", type=int, default=100)
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=0.8)
@@ -89,8 +91,11 @@ def main() -> None:
     vocab = load_vocabulary(_resolve_vocab_path(checkpoint))
     token_root = _resolve_token_root(args, checkpoint)
     source_rows = None
+    sequence_kind = str(args.sequence_kind)
+    if sequence_kind == "auto":
+        sequence_kind = str(checkpoint.get("train_config", {}).get("sequence_kind", "geometry"))
     if token_root is not None:
-        source_rows = ManualSplitTokenSequenceDataset(token_root, sequence_kind="geometry").rows
+        source_rows = ManualSplitTokenSequenceDataset(token_root, sequence_kind=sequence_kind).rows
     constraint_config = None
     if bool(args.constrained):
         constraint_config = GeometryConstrainedSamplerConfig(
@@ -98,22 +103,41 @@ def main() -> None:
             max_points_per_ring=int(args.max_points_per_ring),
             max_holes_per_polygon=int(args.max_holes_per_polygon),
         )
-    rows = sample_model_geometry_rows(
-        model,
-        vocab,
-        num_samples=int(args.num_samples),
-        max_new_tokens=int(args.max_new_tokens),
-        temperature=float(args.temperature),
-        top_k=int(args.top_k) if int(args.top_k) > 0 else None,
-        device=device,
-        source_rows=source_rows,
-        prefix_role=str(args.prefix_role),
-        prefix_label=int(args.prefix_label),
-        prefix_geometry_model=str(args.prefix_geometry_model),
-        constraint_config=constraint_config,
-        progress_every=int(args.progress_every),
-        progress_label="geometry_eval",
-    )
+    if sequence_kind == "conditioned_geometry":
+        if not bool(args.constrained):
+            raise RuntimeError("conditioned_geometry evaluation currently requires constrained sampling")
+        if source_rows is None:
+            raise RuntimeError("conditioned_geometry evaluation requires --token-root or checkpoint train_config token root")
+        rows = sample_model_conditioned_geometry_rows(
+            model,
+            vocab,
+            num_samples=int(args.num_samples),
+            max_new_tokens=int(args.max_new_tokens),
+            temperature=float(args.temperature),
+            top_k=int(args.top_k) if int(args.top_k) > 0 else None,
+            device=device,
+            source_rows=source_rows,
+            constraint_config=constraint_config,
+            progress_every=int(args.progress_every),
+            progress_label="conditioned_geometry_eval",
+        )
+    else:
+        rows = sample_model_geometry_rows(
+            model,
+            vocab,
+            num_samples=int(args.num_samples),
+            max_new_tokens=int(args.max_new_tokens),
+            temperature=float(args.temperature),
+            top_k=int(args.top_k) if int(args.top_k) > 0 else None,
+            device=device,
+            source_rows=source_rows,
+            prefix_role=str(args.prefix_role),
+            prefix_label=int(args.prefix_label),
+            prefix_geometry_model=str(args.prefix_geometry_model),
+            constraint_config=constraint_config,
+            progress_every=int(args.progress_every),
+            progress_label="geometry_eval",
+        )
     for row in rows:
         row["checkpoint"] = str(args.checkpoint.as_posix())
         row["sampling_config"] = {
@@ -132,6 +156,7 @@ def main() -> None:
             "checkpoint_iter": checkpoint.get("iter_num"),
             "checkpoint_best_val_loss": checkpoint.get("best_val_loss"),
             "sampling_mode": "constrained" if bool(args.constrained) else "unconstrained",
+            "sequence_kind": sequence_kind,
             "sampling_config": rows[0]["sampling_config"] if rows else {},
         }
     )

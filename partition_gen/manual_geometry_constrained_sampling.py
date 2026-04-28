@@ -291,12 +291,19 @@ def sample_geometry_constrained(
     if missing:
         raise ValueError(f"Geometry prefix contains tokens not in vocab: {missing}")
 
+    try:
+        grammar_start_index = prefix.index("MANUAL_GEOMETRY_V1")
+    except ValueError as exc:
+        raise ValueError("Geometry prefix must contain MANUAL_GEOMETRY_V1") from exc
+
     state = GeometryGrammarState(config=constraint_config)
     ids = [int(vocab["<BOS>"])]
     tokens = ["<BOS>"]
-    for token in prefix[1:]:
+    for prefix_index, token in enumerate(prefix[1:], start=1):
         ids.append(int(vocab[str(token)]))
         tokens.append(str(token))
+        if prefix_index < int(grammar_start_index):
+            continue
         if not state.step(str(token)):
             return {
                 "ids": ids,

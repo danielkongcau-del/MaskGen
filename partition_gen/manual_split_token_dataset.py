@@ -30,13 +30,18 @@ class ManualSplitTokenSequenceDataset(Dataset):
         max_length: int | None = None,
     ) -> None:
         self.token_root = Path(token_root)
-        if sequence_kind not in {"topology", "geometry"}:
-            raise ValueError(f"sequence_kind must be topology or geometry, got {sequence_kind}")
+        if sequence_kind not in {"topology", "geometry", "conditioned_geometry"}:
+            raise ValueError(f"sequence_kind must be topology, geometry, or conditioned_geometry, got {sequence_kind}")
         self.sequence_kind = sequence_kind
         self.vocab = load_vocabulary(self.token_root / "vocab.json")
         self.pad_id = int(self.vocab["<PAD>"])
         self.unk_id = int(self.vocab["<UNK>"])
-        filename = "topology_sequences.jsonl" if sequence_kind == "topology" else "geometry_sequences.jsonl"
+        filename_by_kind = {
+            "topology": "topology_sequences.jsonl",
+            "geometry": "geometry_sequences.jsonl",
+            "conditioned_geometry": "conditioned_geometry_sequences.jsonl",
+        }
+        filename = filename_by_kind[sequence_kind]
         rows = _read_jsonl(self.token_root / filename)
         if max_length is not None:
             rows = [row for row in rows if int(row.get("length", len(row.get("tokens", [])))) <= int(max_length)]
@@ -57,6 +62,8 @@ class ManualSplitTokenSequenceDataset(Dataset):
             "stem": row.get("stem"),
             "source_target": row.get("source_target"),
             "source_node_id": row.get("source_node_id"),
+            "target_node_index": row.get("target_node_index"),
+            "loss_start_index": row.get("loss_start_index"),
             "sequence_kind": self.sequence_kind,
         }
 
@@ -83,6 +90,10 @@ def collate_manual_split_token_sequences(
             continue
         input_ids[row_index, :input_length] = ids[:-1]
         labels[row_index, :input_length] = ids[1:]
+        loss_start_index = item.get("loss_start_index")
+        if loss_start_index is not None:
+            label_start = max(0, int(loss_start_index) - 1)
+            labels[row_index, : min(label_start, input_length)] = int(ignore_index)
         attention_mask[row_index, :input_length] = True
     return {
         "input_ids": input_ids,
@@ -92,6 +103,8 @@ def collate_manual_split_token_sequences(
         "stems": [item.get("stem") for item in batch],
         "source_targets": [item.get("source_target") for item in batch],
         "source_node_ids": [item.get("source_node_id") for item in batch],
+        "target_node_indices": [item.get("target_node_index") for item in batch],
+        "loss_start_indices": [item.get("loss_start_index") for item in batch],
         "sequence_kind": batch[0].get("sequence_kind") if batch else None,
     }
 

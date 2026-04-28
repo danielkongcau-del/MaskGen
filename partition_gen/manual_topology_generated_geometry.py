@@ -10,6 +10,7 @@ from partition_gen.manual_topology_sample_validation import validate_topology_to
 
 
 GeometrySampler = Callable[[dict, int], tuple[dict | None, dict]]
+ConditionedGeometrySampler = Callable[[dict, dict, int], tuple[dict | None, dict]]
 
 
 def _percentile(values: Sequence[int], q: float) -> int | None:
@@ -34,6 +35,23 @@ def attach_generated_geometry(
     topology_target: dict,
     geometry_sampler: GeometrySampler,
 ) -> tuple[dict, dict]:
+    return _attach_generated_geometry_impl(
+        topology_target,
+        lambda topology, node, node_index: geometry_sampler(node, node_index),
+    )
+
+
+def attach_conditioned_generated_geometry(
+    topology_target: dict,
+    geometry_sampler: ConditionedGeometrySampler,
+) -> tuple[dict, dict]:
+    return _attach_generated_geometry_impl(topology_target, geometry_sampler)
+
+
+def _attach_generated_geometry_impl(
+    topology_target: dict,
+    geometry_sampler: ConditionedGeometrySampler,
+) -> tuple[dict, dict]:
     graph = topology_target.get("parse_graph", {}) or {}
     nodes: List[dict] = []
     attach_modes: Counter[str] = Counter()
@@ -44,7 +62,7 @@ def attach_generated_geometry(
         output_node = copy.deepcopy(node)
         geometry_ref = output_node.pop("geometry_ref", None)
         if geometry_ref:
-            geometry_target, geometry_diag = geometry_sampler(output_node, int(node_index))
+            geometry_target, geometry_diag = geometry_sampler(topology_target, output_node, int(node_index))
             geometry_rows.append(
                 {
                     "node_index": int(node_index),
@@ -149,6 +167,63 @@ def build_generated_geometry_targets_from_sample_rows(
 
     summary = {
         "format": "maskgen_generated_geometry_summary_v1",
+        "input_count": int(len(rows)),
+        "output_count": int(len(targets)),
+        "skipped_invalid_count": int(skipped_invalid),
+        "geometry_request_count": int(sum(int(row["geometry_request_count"]) for row in diagnostics_rows)),
+        "geometry_valid_count": int(sum(int(row["geometry_valid_count"]) for row in diagnostics_rows)),
+        "attached_geometry_count": int(sum(int(row["attached_geometry_count"]) for row in diagnostics_rows)),
+        "missing_geometry_count": int(sum(int(row["missing_geometry_count"]) for row in diagnostics_rows)),
+        "node_count_mean": float(mean(node_counts)) if node_counts else None,
+        "relation_count_mean": float(mean(relation_counts)) if relation_counts else None,
+        "geometry_lengths": _numeric_summary(geometry_lengths),
+        "attach_modes": dict(attach_modes),
+        "rows": diagnostics_rows,
+    }
+    return targets, summary
+
+
+def build_conditioned_generated_geometry_targets_from_sample_rows(
+    rows: Sequence[dict],
+    geometry_sampler: ConditionedGeometrySampler,
+    *,
+    include_invalid: bool = False,
+) -> tuple[List[dict], dict]:
+    targets: List[dict] = []
+    diagnostics_rows: List[dict] = []
+    skipped_invalid = 0
+    for fallback_index, row in enumerate(rows):
+        tokens = [str(token) for token in row.get("tokens", []) or []]
+        validation = validate_topology_tokens(tokens)
+        if not bool(validation["semantic_valid"]) and not include_invalid:
+            skipped_invalid += 1
+            continue
+        topology_target = decode_topology_tokens_to_target(tokens)
+        sample_index = int(row.get("sample_index", fallback_index))
+        topology_target["metadata"].update(
+            {
+                "sample_index": sample_index,
+                "semantic_valid": bool(validation["semantic_valid"]),
+                "checkpoint": row.get("checkpoint"),
+            }
+        )
+        target, diagnostics = attach_conditioned_generated_geometry(topology_target, geometry_sampler)
+        target["metadata"]["sample_index"] = sample_index
+        targets.append(target)
+        diagnostics_rows.append({"sample_index": sample_index, **diagnostics})
+
+    node_counts = [int(row["node_count"]) for row in diagnostics_rows]
+    relation_counts = [int(row["relation_count"]) for row in diagnostics_rows]
+    geometry_lengths: List[int] = []
+    attach_modes = Counter()
+    for row in diagnostics_rows:
+        attach_modes.update(row.get("attach_modes", {}))
+        for geometry_row in row.get("geometry_rows", []) or []:
+            if geometry_row.get("length") is not None:
+                geometry_lengths.append(int(geometry_row["length"]))
+
+    summary = {
+        "format": "maskgen_conditioned_generated_geometry_summary_v1",
         "input_count": int(len(rows)),
         "output_count": int(len(targets)),
         "skipped_invalid_count": int(skipped_invalid),

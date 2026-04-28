@@ -26,6 +26,7 @@ from partition_gen.manual_ar_training import (  # noqa: E402
     save_json,
 )
 from partition_gen.manual_geometry_constrained_sampling import GeometryConstrainedSamplerConfig  # noqa: E402
+from partition_gen.manual_geometry_conditioned_evaluation import sample_model_conditioned_geometry_rows  # noqa: E402
 from partition_gen.manual_geometry_evaluation import (  # noqa: E402
     evaluate_geometry_sample_rows,
     sample_model_geometry_rows,
@@ -41,6 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train per-node manual geometry AR Transformer.")
     parser.add_argument("--train-token-root", type=Path, default=Path("data/remote_256_generator_tokens_manual_split_full/train"))
     parser.add_argument("--val-token-root", type=Path, default=Path("data/remote_256_generator_tokens_manual_split_full/val"))
+    parser.add_argument("--sequence-kind", type=str, default="geometry", choices=["geometry", "conditioned_geometry"])
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/manual_geometry_ar"))
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--block-size", type=int, default=1024)
@@ -88,8 +90,14 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def make_dataset(token_root: Path, *, max_samples: int | None, block_size: int) -> ManualSplitTokenSequenceDataset:
-    dataset = ManualSplitTokenSequenceDataset(token_root, sequence_kind="geometry", max_length=block_size + 1)
+def make_dataset(
+    token_root: Path,
+    *,
+    sequence_kind: str,
+    max_samples: int | None,
+    block_size: int,
+) -> ManualSplitTokenSequenceDataset:
+    dataset = ManualSplitTokenSequenceDataset(token_root, sequence_kind=sequence_kind, max_length=block_size + 1)
     if max_samples is not None:
         dataset.rows = dataset.rows[: min(int(max_samples), len(dataset.rows))]
     return dataset
@@ -129,8 +137,18 @@ def main() -> None:
     output_dir = args.output_dir / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    train_dataset = make_dataset(args.train_token_root, max_samples=args.max_train_samples, block_size=args.block_size)
-    val_dataset = make_dataset(args.val_token_root, max_samples=args.max_val_samples, block_size=args.block_size)
+    train_dataset = make_dataset(
+        args.train_token_root,
+        sequence_kind=str(args.sequence_kind),
+        max_samples=args.max_train_samples,
+        block_size=args.block_size,
+    )
+    val_dataset = make_dataset(
+        args.val_token_root,
+        sequence_kind=str(args.sequence_kind),
+        max_samples=args.max_val_samples,
+        block_size=args.block_size,
+    )
     if len(train_dataset) == 0 or len(val_dataset) == 0:
         raise RuntimeError("Train and validation geometry datasets must both be non-empty.")
     train_loader = make_loader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
@@ -183,7 +201,7 @@ def main() -> None:
 
     train_config = {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()}
     train_config["resolved_output_dir"] = str(output_dir.as_posix())
-    train_config["sequence_kind"] = "geometry"
+    train_config["sequence_kind"] = str(args.sequence_kind)
     train_config["train_sample_count"] = int(len(train_dataset))
     train_config["val_sample_count"] = int(len(val_dataset))
     train_config["vocab_size"] = int(len(vocab))
@@ -235,19 +253,34 @@ def main() -> None:
             val_loss = estimate_loss(model, val_loader, device, eval_iters=int(args.eval_iters), amp=bool(args.amp))
             metrics = {"train_loss": train_loss, "val_loss": val_loss, "geometry_valid_rate": best_geometry_valid_rate}
             if int(args.geometry_eval_samples) > 0:
-                rows = sample_model_geometry_rows(
-                    model,
-                    vocab,
-                    num_samples=int(args.geometry_eval_samples),
-                    max_new_tokens=int(args.geometry_eval_max_new_tokens),
-                    temperature=float(args.geometry_eval_temperature),
-                    top_k=int(args.geometry_eval_top_k) if int(args.geometry_eval_top_k) > 0 else None,
-                    device=device,
-                    source_rows=val_dataset.rows,
-                    constraint_config=GeometryConstrainedSamplerConfig(),
-                    progress_every=int(args.geometry_eval_progress_every),
-                    progress_label=f"geometry_eval_iter_{iter_num}",
-                )
+                if str(args.sequence_kind) == "conditioned_geometry":
+                    rows = sample_model_conditioned_geometry_rows(
+                        model,
+                        vocab,
+                        num_samples=int(args.geometry_eval_samples),
+                        max_new_tokens=int(args.geometry_eval_max_new_tokens),
+                        temperature=float(args.geometry_eval_temperature),
+                        top_k=int(args.geometry_eval_top_k) if int(args.geometry_eval_top_k) > 0 else None,
+                        device=device,
+                        source_rows=val_dataset.rows,
+                        constraint_config=GeometryConstrainedSamplerConfig(),
+                        progress_every=int(args.geometry_eval_progress_every),
+                        progress_label=f"conditioned_geometry_eval_iter_{iter_num}",
+                    )
+                else:
+                    rows = sample_model_geometry_rows(
+                        model,
+                        vocab,
+                        num_samples=int(args.geometry_eval_samples),
+                        max_new_tokens=int(args.geometry_eval_max_new_tokens),
+                        temperature=float(args.geometry_eval_temperature),
+                        top_k=int(args.geometry_eval_top_k) if int(args.geometry_eval_top_k) > 0 else None,
+                        device=device,
+                        source_rows=val_dataset.rows,
+                        constraint_config=GeometryConstrainedSamplerConfig(),
+                        progress_every=int(args.geometry_eval_progress_every),
+                        progress_label=f"geometry_eval_iter_{iter_num}",
+                    )
                 summary = evaluate_geometry_sample_rows(rows, top_k_invalid=10)
                 save_json(output_dir / f"geometry_eval_iter_{iter_num}.json", summary)
                 metrics.update(compact_geometry_eval_metrics(summary))

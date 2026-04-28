@@ -3,7 +3,9 @@ from __future__ import annotations
 import unittest
 
 from partition_gen.manual_topology_generated_geometry import (
+    attach_conditioned_generated_geometry,
     attach_generated_geometry,
+    build_conditioned_generated_geometry_targets_from_sample_rows,
     build_generated_geometry_targets_from_sample_rows,
 )
 from partition_gen.parse_graph_compact_tokenizer import encode_topology_target
@@ -76,6 +78,11 @@ def _sampler(node: dict, _node_index: int) -> tuple[dict, dict]:
     return target, {"valid": True, "length": 32, "hit_eos": True, "errors": []}
 
 
+def _conditioned_sampler(_topology_target: dict, node: dict, node_index: int) -> tuple[dict, dict]:
+    target = _geometry_target(str(node["id"]), str(node["role"]), int(node["label"]))
+    return target, {"valid": True, "length": 32, "hit_eos": True, "errors": [], "node_index": node_index}
+
+
 class ManualTopologyGeneratedGeometryTest(unittest.TestCase):
     def test_attach_generated_geometry_uses_sampler_outputs(self) -> None:
         merged, diagnostics = attach_generated_geometry(_topology_target(), _sampler)
@@ -98,6 +105,31 @@ class ManualTopologyGeneratedGeometryTest(unittest.TestCase):
                 {"sample_index": 1, "tokens": invalid_tokens},
             ],
             _sampler,
+        )
+
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(summary["skipped_invalid_count"], 1)
+        self.assertEqual(summary["attached_geometry_count"], 2)
+
+    def test_attach_conditioned_generated_geometry_passes_topology_to_sampler(self) -> None:
+        merged, diagnostics = attach_conditioned_generated_geometry(_topology_target(), _conditioned_sampler)
+
+        nodes_by_id = {node["id"]: node for node in merged["parse_graph"]["nodes"]}
+        self.assertIn("geometry", nodes_by_id["support_0"])
+        self.assertIn("geometry", nodes_by_id["insert_0"])
+        self.assertEqual(diagnostics["geometry_request_count"], 2)
+        self.assertEqual(diagnostics["attached_geometry_count"], 2)
+
+    def test_build_conditioned_generated_geometry_targets_skips_invalid_rows_by_default(self) -> None:
+        valid_tokens = encode_topology_target(_topology_target())
+        invalid_tokens = valid_tokens[:-1]
+
+        targets, summary = build_conditioned_generated_geometry_targets_from_sample_rows(
+            [
+                {"sample_index": 0, "tokens": valid_tokens},
+                {"sample_index": 1, "tokens": invalid_tokens},
+            ],
+            _conditioned_sampler,
         )
 
         self.assertEqual(len(targets), 1)
