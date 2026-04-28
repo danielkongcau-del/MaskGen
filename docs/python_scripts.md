@@ -304,6 +304,12 @@ Renders full manual `parse_graph` targets to PNG.
 
 It draws renderable `polygon_code` nodes by applying each node's `frame` transform to local polygon vertices. This is intended for quick qualitative checks of placeholder-geometry outputs and future geometry-generator outputs.
 
+### `scripts/materialize_manual_split_targets.py`
+
+Rebuilds full manual `parse_graph` targets from a topology/geometry split manifest.
+
+It reads `topology_path` plus `geometry_paths`, attaches the true split `frame` and local geometry payloads back onto topology nodes with `geometry_ref`, then writes a normal `graphs/` plus `manifest.jsonl` output root. Use this before spatial audit when the source is `data/remote_256_generator_targets_manual_split_full/{train,val}` rather than a full target directory.
+
 ### `scripts/summarize_weak_explainer_benchmark.py`
 
 Summarizes a weak explainer benchmark JSONL into Markdown or JSON.
