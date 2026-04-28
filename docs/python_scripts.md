@@ -262,6 +262,12 @@ Runs a small-sample overfit diagnostic for the layout/frame MLP.
 
 It trains and evaluates on the same first `--max-examples` examples from a split root. This is intended to catch broken labels, loss wiring, or dequantization before interpreting full validation performance. A healthy model should drive train-set origin MAE down on a small subset.
 
+### `scripts/train_manual_layout_frame_regression.py`
+
+Trains the v2b continuous regression layout/frame baseline.
+
+It uses the same engineered topology features as `train_manual_layout_frame.py`, but predicts normalized `(origin_x, origin_y, scale, sin(theta), cos(theta))` with SmoothL1 loss. This is diagnostic only; keep it only if validation origin MAE clearly beats the `(role, label)` mean baseline.
+
 ### `scripts/attach_layout_frame_to_split_targets.py`
 
 Attaches predicted frames to real split topology targets while preserving true local geometry shapes.

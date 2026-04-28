@@ -362,11 +362,24 @@ class ManualLayoutFrameDataset(Dataset):
     def __getitem__(self, index: int) -> dict:
         row = self.rows[int(index)]
         bins = row["target_bins"]
+        frame = row["target_frame"]
+        origin = frame.get("origin", [0.0, 0.0]) or [0.0, 0.0]
+        orientation = float(frame.get("orientation", 0.0))
         return {
             "role_id": torch.tensor(int(row["role_id"]), dtype=torch.long),
             "label_id": torch.tensor(int(row["label_id"]), dtype=torch.long),
             "geometry_model_id": torch.tensor(int(row["geometry_model_id"]), dtype=torch.long),
             "numeric": torch.tensor(row["numeric"], dtype=torch.float32),
+            "frame_values": torch.tensor(
+                [
+                    float(origin[0]) / float(self.config.position_max),
+                    float(origin[1]) / float(self.config.position_max),
+                    float(frame.get("scale", 1.0)) / float(self.config.scale_max),
+                    math.sin(orientation),
+                    math.cos(orientation),
+                ],
+                dtype=torch.float32,
+            ),
             "origin_x": torch.tensor(int(bins["origin_x"]), dtype=torch.long),
             "origin_y": torch.tensor(int(bins["origin_y"]), dtype=torch.long),
             "scale": torch.tensor(int(bins["scale"]), dtype=torch.long),
@@ -384,6 +397,7 @@ def collate_layout_frame_examples(batch: Sequence[dict]) -> dict:
         "label_id": torch.stack([item["label_id"] for item in batch], dim=0),
         "geometry_model_id": torch.stack([item["geometry_model_id"] for item in batch], dim=0),
         "numeric": torch.stack([item["numeric"] for item in batch], dim=0),
+        "frame_values": torch.stack([item["frame_values"] for item in batch], dim=0),
         "origin_x": torch.stack([item["origin_x"] for item in batch], dim=0),
         "origin_y": torch.stack([item["origin_y"] for item in batch], dim=0),
         "scale": torch.stack([item["scale"] for item in batch], dim=0),
@@ -442,6 +456,44 @@ class ManualLayoutFrameMLP(nn.Module):
         }
 
 
+@dataclass
+class ManualLayoutFrameRegressorConfig:
+    numeric_dim: int
+    role_count: int = 6
+    label_count: int = 64
+    geometry_model_count: int = 4
+    role_emb_dim: int = 16
+    label_emb_dim: int = 16
+    geometry_emb_dim: int = 8
+    hidden_dim: int = 256
+    num_layers: int = 3
+    dropout: float = 0.1
+
+
+class ManualLayoutFrameRegressor(nn.Module):
+    def __init__(self, config: ManualLayoutFrameRegressorConfig) -> None:
+        super().__init__()
+        self.config = config
+        self.role_embedding = nn.Embedding(int(config.role_count), int(config.role_emb_dim))
+        self.label_embedding = nn.Embedding(int(config.label_count), int(config.label_emb_dim))
+        self.geometry_embedding = nn.Embedding(int(config.geometry_model_count), int(config.geometry_emb_dim))
+        input_dim = int(config.numeric_dim + config.role_emb_dim + config.label_emb_dim + config.geometry_emb_dim)
+        layers: List[nn.Module] = []
+        for layer_index in range(int(config.num_layers)):
+            layers.append(nn.Linear(input_dim if layer_index == 0 else int(config.hidden_dim), int(config.hidden_dim)))
+            layers.append(nn.GELU())
+            layers.append(nn.Dropout(float(config.dropout)))
+        self.backbone = nn.Sequential(*layers)
+        self.head = nn.Linear(int(config.hidden_dim), 5)
+
+    def forward(self, batch: dict) -> torch.Tensor:
+        role = self.role_embedding(batch["role_id"].clamp(0, self.config.role_count - 1))
+        label = self.label_embedding(batch["label_id"].clamp(0, self.config.label_count - 1))
+        geometry = self.geometry_embedding(batch["geometry_model_id"].clamp(0, self.config.geometry_model_count - 1))
+        x = torch.cat([role, label, geometry, batch["numeric"].float()], dim=-1)
+        return self.head(self.backbone(x))
+
+
 def layout_frame_loss(logits: dict, batch: dict) -> torch.Tensor:
     losses = [
         F.cross_entropy(logits["origin_x"], batch["origin_x"]),
@@ -452,9 +504,23 @@ def layout_frame_loss(logits: dict, batch: dict) -> torch.Tensor:
     return sum(losses) / float(len(losses))
 
 
+def layout_frame_regression_loss(predictions: torch.Tensor, batch: dict) -> torch.Tensor:
+    return F.smooth_l1_loss(predictions.float(), batch["frame_values"].float())
+
+
 def move_layout_batch_to_device(batch: dict, device: torch.device) -> dict:
     moved = dict(batch)
-    for key in ("role_id", "label_id", "geometry_model_id", "numeric", "origin_x", "origin_y", "scale", "orientation"):
+    for key in (
+        "role_id",
+        "label_id",
+        "geometry_model_id",
+        "numeric",
+        "frame_values",
+        "origin_x",
+        "origin_y",
+        "scale",
+        "orientation",
+    ):
         moved[key] = batch[key].to(device, non_blocking=True)
     return moved
 
@@ -510,6 +576,16 @@ def _frame_error_row(pred_frame: dict, target_frame: dict) -> dict:
         "scale_mae": float(abs(float(pred_frame["scale"]) - float(target_frame["scale"]))),
         "orientation_mae": float(_angle_abs_error(float(pred_frame["orientation"]), float(target_frame["orientation"]))),
     }
+
+
+def regression_values_to_frame(values: Sequence[float] | torch.Tensor, *, config: ParseGraphTokenizerConfig) -> dict:
+    if isinstance(values, torch.Tensor):
+        values = values.detach().cpu().tolist()
+    origin_x = min(1.0, max(0.0, float(values[0]))) * float(config.position_max)
+    origin_y = min(1.0, max(0.0, float(values[1]))) * float(config.position_max)
+    scale = min(1.0, max(0.0, float(values[2]))) * float(config.scale_max)
+    orientation = math.atan2(float(values[3]), float(values[4]))
+    return {"origin": [origin_x, origin_y], "scale": scale, "orientation": orientation}
 
 
 @torch.no_grad()
@@ -573,6 +649,55 @@ def evaluate_layout_frame_model(
             }
             for name in FRAME_HEADS
         },
+        "role_metrics": {
+            role: {
+                "count": int(role_counts[role]),
+                "origin_mae": avg(values["origin_mae"]),
+                "scale_mae": avg(values["scale_mae"]),
+                "orientation_mae": avg(values["orientation_mae"]),
+            }
+            for role, values in sorted(role_errors.items())
+        },
+    }
+
+
+@torch.no_grad()
+def evaluate_layout_frame_regressor(
+    model: ManualLayoutFrameRegressor,
+    loader,
+    *,
+    device: torch.device,
+    config: ParseGraphTokenizerConfig,
+) -> dict:
+    model.eval()
+    losses: List[float] = []
+    errors = defaultdict(list)
+    role_errors = defaultdict(lambda: defaultdict(list))
+    role_counts = Counter()
+    for batch in loader:
+        moved = move_layout_batch_to_device(batch, device)
+        predictions = model(moved)
+        loss = layout_frame_regression_loss(predictions, moved)
+        losses.append(float(loss.item()))
+        predictions = predictions.detach().cpu()
+        targets = batch["frame_values"].detach().cpu()
+        for row_index, metadata in enumerate(batch["metadata"]):
+            role = str(metadata.get("role", "unknown"))
+            role_counts[role] += 1
+            pred_frame = regression_values_to_frame(predictions[row_index], config=config)
+            target_frame = regression_values_to_frame(targets[row_index], config=config)
+            for key, value in _frame_error_row(pred_frame, target_frame).items():
+                errors[key].append(float(value))
+                role_errors[role][key].append(float(value))
+
+    def avg(values: Sequence[float]) -> float | None:
+        return float(mean(values)) if values else None
+
+    return {
+        "loss": avg(losses),
+        "origin_mae": avg(errors["origin_mae"]),
+        "scale_mae": avg(errors["scale_mae"]),
+        "orientation_mae": avg(errors["orientation_mae"]),
         "role_metrics": {
             role: {
                 "count": int(role_counts[role]),

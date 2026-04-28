@@ -11,6 +11,8 @@ from partition_gen.manual_layout_frame import (
     ManualLayoutFrameDataset,
     ManualLayoutFrameMLP,
     ManualLayoutFrameMLPConfig,
+    ManualLayoutFrameRegressor,
+    ManualLayoutFrameRegressorConfig,
     attach_predicted_frames_to_topology_sample_rows,
     attach_predicted_frames_to_split_rows,
     bins_to_frame,
@@ -20,6 +22,7 @@ from partition_gen.manual_layout_frame import (
     evaluate_role_label_frame_baseline,
     frame_to_bins,
     layout_frame_loss,
+    layout_frame_regression_loss,
 )
 from partition_gen.manual_topology_placeholder_geometry import GeometryPlaceholderLibrary
 from partition_gen.parse_graph_compact_tokenizer import encode_topology_target
@@ -173,6 +176,26 @@ class ManualLayoutFrameTest(unittest.TestCase):
 
             self.assertEqual(logits["origin_x"].shape, (2, 1024))
             self.assertTrue(float(loss.item()) > 0.0)
+
+    def test_regression_mlp_forward_backward(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            split_root = _write_split(tmpdir)
+            dataset = ManualLayoutFrameDataset(split_root)
+            batch = collate_layout_frame_examples([dataset[0], dataset[1]])
+            model = ManualLayoutFrameRegressor(
+                ManualLayoutFrameRegressorConfig(
+                    numeric_dim=dataset.numeric_dim,
+                    hidden_dim=32,
+                    num_layers=1,
+                )
+            )
+
+            predictions = model(batch)
+            loss = layout_frame_regression_loss(predictions, batch)
+            loss.backward()
+
+            self.assertEqual(predictions.shape, (2, 5))
+            self.assertTrue(float(loss.item()) >= 0.0)
 
     def test_evaluate_reports_histograms(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
