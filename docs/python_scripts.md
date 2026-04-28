@@ -202,6 +202,30 @@ Attaches topology-conditioned generated geometry to generated topology samples.
 
 It decodes semantic-valid `MANUAL_TOPOLOGY_V1` rows and, for each renderable node with `geometry_ref`, builds a full topology-conditioned prefix containing the decoded topology and target node index before constrained geometry sampling. This is the v1 learned-geometry attachment path.
 
+### `scripts/train_manual_layout_frame.py`
+
+Trains the v2a topology-conditioned layout/frame predictor.
+
+It reads topology/geometry split targets, builds one supervised example per renderable geometry node, and predicts quantized `FRAME` fields (`origin_x`, `origin_y`, `scale`, `orientation`) with four classification heads from engineered topology features.
+
+### `scripts/evaluate_manual_layout_frame.py`
+
+Evaluates a layout/frame predictor checkpoint on a split target root.
+
+It reports CE loss, per-head bin accuracy, origin/scale/orientation MAE, and role-wise MAE metrics for diagnosing whether layout prediction is improving before local shape generation is reintroduced.
+
+### `scripts/attach_layout_frame_to_split_targets.py`
+
+Attaches predicted frames to real split topology targets while preserving true local geometry shapes.
+
+Use this to isolate layout quality: the output parse graphs use model-predicted `frame` values and true `geometry`/`atoms` payloads from the split dataset, then can be checked with the spatial audit and visualization scripts.
+
+### `scripts/attach_layout_frame_to_topology_samples.py`
+
+Attaches predicted frames plus placeholder local shapes to generated topology samples.
+
+It decodes generated topology rows, predicts a frame for each renderable `geometry_ref` node, retrieves a local shape by `(role, label, geometry_model)` from a split dataset, and writes full parse-graph targets for downstream spatial audit and visualization.
+
 ### `scripts/attach_placeholder_geometry_to_topology_samples.py`
 
 Attaches retrieved real geometry targets to generated manual topology samples as a downstream smoke test before a learned geometry generator exists.
