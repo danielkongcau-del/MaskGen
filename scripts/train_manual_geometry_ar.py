@@ -35,6 +35,10 @@ from partition_gen.manual_geometry_evaluation import (  # noqa: E402
     sample_model_geometry_rows,
 )
 from partition_gen.manual_layout_ar import evaluate_layout_sample_rows, sample_model_conditioned_layout_rows  # noqa: E402
+from partition_gen.manual_relative_layout_ar import (  # noqa: E402
+    evaluate_relative_layout_sample_rows,
+    sample_model_conditioned_relative_layout_rows,
+)
 from partition_gen.manual_split_token_dataset import (  # noqa: E402
     ManualSplitTokenSequenceDataset,
     collate_manual_split_token_sequences,
@@ -50,7 +54,7 @@ def parse_args() -> argparse.Namespace:
         "--sequence-kind",
         type=str,
         default="geometry",
-        choices=["geometry", "conditioned_geometry", "oracle_frame_geometry", "layout"],
+        choices=["geometry", "conditioned_geometry", "oracle_frame_geometry", "layout", "relative_layout"],
     )
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/manual_geometry_ar"))
     parser.add_argument("--run-name", type=str, default=None)
@@ -357,6 +361,22 @@ def main() -> None:
                     )
                     summary = evaluate_layout_sample_rows(rows, top_k_invalid=10)
                     save_json(output_dir / f"layout_eval_iter_{iter_num}.json", summary)
+                    metrics.update(compact_layout_eval_metrics(summary))
+                elif str(args.sequence_kind) == "relative_layout":
+                    rows = sample_model_conditioned_relative_layout_rows(
+                        model,
+                        vocab,
+                        num_samples=int(args.geometry_eval_samples),
+                        max_new_tokens=int(args.geometry_eval_max_new_tokens),
+                        temperature=float(args.geometry_eval_temperature),
+                        top_k=int(args.geometry_eval_top_k) if int(args.geometry_eval_top_k) > 0 else None,
+                        device=device,
+                        source_rows=val_dataset.rows,
+                        progress_every=int(args.geometry_eval_progress_every),
+                        progress_label=f"relative_layout_eval_iter_{iter_num}",
+                    )
+                    summary = evaluate_relative_layout_sample_rows(rows, top_k_invalid=10)
+                    save_json(output_dir / f"relative_layout_eval_iter_{iter_num}.json", summary)
                     metrics.update(compact_layout_eval_metrics(summary))
                 else:
                     rows = sample_model_geometry_rows(

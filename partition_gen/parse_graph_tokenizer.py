@@ -70,10 +70,17 @@ STATIC_TOKENS = [
     "MANUAL_GEOMETRY_CONDITION_V1",
     "MANUAL_LAYOUT_V1",
     "MANUAL_LAYOUT_CONDITION_V1",
+    "MANUAL_REL_LAYOUT_V1",
+    "MANUAL_REL_LAYOUT_CONDITION_V1",
     "TOPOLOGY_CONTEXT",
     "TARGET_NODE",
     "GEOMETRY_TARGET",
     "LAYOUT_TARGET",
+    "REL_LAYOUT_TARGET",
+    "ANCHOR_GLOBAL",
+    "ANCHOR_NODE",
+    "FRAME_ABS",
+    "FRAME_REL",
     "NODE_BLOCK",
     "ROLE_BLOCK",
     "LABEL_BLOCK",
@@ -111,6 +118,10 @@ class ParseGraphTokenizerConfig:
     length_bins: int = 1024
     length_min: float = 0.0
     length_max: float = 512.0
+    relative_offset_min: float = -8.0
+    relative_offset_max: float = 8.0
+    relative_log_scale_min: float = -6.0
+    relative_log_scale_max: float = 6.0
     max_int: int = 4096
 
 

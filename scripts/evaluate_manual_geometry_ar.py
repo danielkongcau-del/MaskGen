@@ -26,6 +26,10 @@ from partition_gen.manual_geometry_evaluation import (  # noqa: E402
     write_geometry_sample_rows,
 )
 from partition_gen.manual_layout_ar import evaluate_layout_sample_rows, sample_model_conditioned_layout_rows  # noqa: E402
+from partition_gen.manual_relative_layout_ar import (  # noqa: E402
+    evaluate_relative_layout_sample_rows,
+    sample_model_conditioned_relative_layout_rows,
+)
 from partition_gen.manual_split_token_dataset import ManualSplitTokenSequenceDataset  # noqa: E402
 from partition_gen.parse_graph_tokenizer import load_vocabulary  # noqa: E402
 
@@ -41,7 +45,7 @@ def parse_args() -> argparse.Namespace:
         "--sequence-kind",
         type=str,
         default="auto",
-        choices=["auto", "geometry", "conditioned_geometry", "oracle_frame_geometry", "layout"],
+        choices=["auto", "geometry", "conditioned_geometry", "oracle_frame_geometry", "layout", "relative_layout"],
     )
     parser.add_argument("--num-samples", type=int, default=100)
     parser.add_argument("--max-new-tokens", type=int, default=512)
@@ -163,6 +167,21 @@ def main() -> None:
             progress_every=int(args.progress_every),
             progress_label="layout_eval",
         )
+    elif sequence_kind == "relative_layout":
+        if source_rows is None:
+            raise RuntimeError("relative_layout evaluation requires --token-root or checkpoint train_config token root")
+        rows = sample_model_conditioned_relative_layout_rows(
+            model,
+            vocab,
+            num_samples=int(args.num_samples),
+            max_new_tokens=int(args.max_new_tokens),
+            temperature=float(args.temperature),
+            top_k=int(args.top_k) if int(args.top_k) > 0 else None,
+            device=device,
+            source_rows=source_rows,
+            progress_every=int(args.progress_every),
+            progress_label="relative_layout_eval",
+        )
     else:
         rows = sample_model_geometry_rows(
             model,
@@ -193,6 +212,8 @@ def main() -> None:
         }
     if sequence_kind == "layout":
         summary = evaluate_layout_sample_rows(rows, top_k_invalid=int(args.top_k_invalid))
+    elif sequence_kind == "relative_layout":
+        summary = evaluate_relative_layout_sample_rows(rows, top_k_invalid=int(args.top_k_invalid))
     else:
         summary = evaluate_geometry_sample_rows(rows, top_k_invalid=int(args.top_k_invalid))
     summary.update(
@@ -207,9 +228,9 @@ def main() -> None:
     )
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     args.output_json.write_text(json.dumps(summary, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
-    if sequence_kind == "layout":
+    if sequence_kind in {"layout", "relative_layout"}:
         lines = [
-            "# Manual Layout AR Evaluation",
+            "# Manual Relative Layout AR Evaluation" if sequence_kind == "relative_layout" else "# Manual Layout AR Evaluation",
             "",
             f"- samples: {summary.get('sample_count')}",
             f"- valid: {summary.get('valid_count')} ({summary.get('valid_rate')})",
@@ -218,6 +239,8 @@ def main() -> None:
             f"- scale MAE: {summary.get('scale_mae')}",
             f"- orientation MAE: {summary.get('orientation_mae')}",
         ]
+        if sequence_kind == "relative_layout":
+            lines.extend(["", f"- anchors: `{json.dumps(summary.get('anchor_mode_histogram', {}), ensure_ascii=False)}`"])
         args.summary_md.parent.mkdir(parents=True, exist_ok=True)
         args.summary_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
     else:
