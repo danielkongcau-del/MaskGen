@@ -27,6 +27,7 @@ from partition_gen.manual_geometry_evaluation import (  # noqa: E402
 )
 from partition_gen.manual_layout_ar import evaluate_layout_sample_rows, sample_model_conditioned_layout_rows  # noqa: E402
 from partition_gen.manual_relative_layout_ar import (  # noqa: E402
+    RelativeLayoutSafetyConfig,
     evaluate_relative_layout_sample_rows,
     sample_model_conditioned_relative_layout_rows,
 )
@@ -62,6 +63,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-holes-per-polygon", type=int, default=8)
     parser.add_argument("--top-k-invalid", type=int, default=20)
     parser.add_argument("--progress-every", type=int, default=10)
+    parser.add_argument("--safe-relative-layout", action="store_true")
+    parser.add_argument("--safe-relative-offset-min", type=float, default=-4.0)
+    parser.add_argument("--safe-relative-offset-max", type=float, default=4.0)
+    parser.add_argument("--safe-relative-log-scale-min", type=float, default=-3.0)
+    parser.add_argument("--safe-relative-log-scale-max", type=float, default=3.0)
+    parser.add_argument("--safe-scale-min", type=float, default=1.0)
+    parser.add_argument("--safe-scale-max", type=float, default=512.0)
+    parser.add_argument("--safe-origin-min", type=float, default=-256.0)
+    parser.add_argument("--safe-origin-max", type=float, default=512.0)
+    parser.add_argument("--safe-enforce-unit-bbox", action=argparse.BooleanOptionalAction, default=True)
     return parser.parse_args()
 
 
@@ -92,6 +103,21 @@ def _resolve_token_root(args: argparse.Namespace, checkpoint: dict) -> Path | No
         if path.exists():
             return path
     return None
+
+
+def _relative_layout_safety_config(args: argparse.Namespace) -> RelativeLayoutSafetyConfig:
+    return RelativeLayoutSafetyConfig(
+        enabled=bool(args.safe_relative_layout),
+        relative_offset_min=float(args.safe_relative_offset_min),
+        relative_offset_max=float(args.safe_relative_offset_max),
+        relative_log_scale_min=float(args.safe_relative_log_scale_min),
+        relative_log_scale_max=float(args.safe_relative_log_scale_max),
+        scale_min=float(args.safe_scale_min),
+        scale_max=float(args.safe_scale_max),
+        origin_min=float(args.safe_origin_min),
+        origin_max=float(args.safe_origin_max),
+        enforce_unit_bbox=bool(args.safe_enforce_unit_bbox),
+    )
 
 
 def main() -> None:
@@ -170,6 +196,7 @@ def main() -> None:
     elif sequence_kind == "relative_layout":
         if source_rows is None:
             raise RuntimeError("relative_layout evaluation requires --token-root or checkpoint train_config token root")
+        safety_config = _relative_layout_safety_config(args)
         rows = sample_model_conditioned_relative_layout_rows(
             model,
             vocab,
@@ -179,6 +206,7 @@ def main() -> None:
             top_k=int(args.top_k) if int(args.top_k) > 0 else None,
             device=device,
             source_rows=source_rows,
+            safety_config=safety_config,
             progress_every=int(args.progress_every),
             progress_label="relative_layout_eval",
         )
@@ -209,6 +237,9 @@ def main() -> None:
             "constrained": bool(args.constrained),
             "constraint_config": None if constraint_config is None else constraint_config.__dict__,
             "token_root": None if token_root is None else str(token_root.as_posix()),
+            "relative_layout_safety": _relative_layout_safety_config(args).to_dict()
+            if sequence_kind == "relative_layout"
+            else None,
         }
     if sequence_kind == "layout":
         summary = evaluate_layout_sample_rows(rows, top_k_invalid=int(args.top_k_invalid))
@@ -241,6 +272,15 @@ def main() -> None:
         ]
         if sequence_kind == "relative_layout":
             lines.extend(["", f"- anchors: `{json.dumps(summary.get('anchor_mode_histogram', {}), ensure_ascii=False)}`"])
+            diagnostics = summary.get("numeric_diagnostics", {}) or {}
+            scale_stats = diagnostics.get("scale_stats", {}) or {}
+            lines.extend(
+                [
+                    f"- origin outside ratio: {diagnostics.get('origin_outside_ratio')}",
+                    f"- unit bbox visible ratio: {diagnostics.get('unit_bbox_visible_ratio')}",
+                    f"- scale p50/p95/max: {scale_stats.get('p50')} / {scale_stats.get('p95')} / {scale_stats.get('max')}",
+                ]
+            )
         args.summary_md.parent.mkdir(parents=True, exist_ok=True)
         args.summary_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
     else:

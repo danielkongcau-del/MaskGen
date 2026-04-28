@@ -7,15 +7,19 @@ import tempfile
 import unittest
 
 from partition_gen.manual_relative_layout_ar import (
+    RelativeLayoutSafetyConfig,
+    RelativeLayoutGrammarState,
     attach_relative_layout_frames_to_topology,
     build_relative_layout_sequence_rows,
     decode_relative_layout_tokens_to_target,
     encode_conditioned_relative_layout_target,
     encode_relative_layout_target,
     extract_relative_layout_tokens_from_conditioned,
+    relative_layout_numeric_diagnostics,
     relative_layout_anchor_for_node,
     relative_layout_start_index,
     relative_layout_to_absolute_layout_target,
+    sanitize_absolute_layout_target,
     validate_relative_layout_tokens,
 )
 from partition_gen.parse_graph_tokenizer import ParseGraphTokenizerConfig, build_token_vocabulary
@@ -224,6 +228,49 @@ class ManualRelativeLayoutARTest(unittest.TestCase):
             self.assertEqual(nodes_by_id["insert_0"]["geometry"]["outer_local"][0], [-0.5, -0.5])
             self.assertEqual(target["parse_graph"]["relations"], _topology_target()["parse_graph"]["relations"])
             self.assertEqual(diagnostics["attached_geometry_count"], 4)
+
+    def test_numeric_diagnostics_report_relative_scale_and_visibility(self) -> None:
+        tokens = encode_relative_layout_target(_topology_target(), _geometry_targets())
+        layout = decode_relative_layout_tokens_to_target(tokens)
+        layout["nodes"][2]["relative_frame"]["log_scale_ratio"] = 8.0
+        layout["nodes"][2]["relative_frame"]["dx"] = 100.0
+
+        diagnostics = relative_layout_numeric_diagnostics(layout, topology_target=_topology_target())
+
+        self.assertGreater(diagnostics["scale_stats"]["max"], 1000.0)
+        self.assertGreater(diagnostics["origin_outside_ratio"], 0.0)
+        self.assertGreater(diagnostics["log_scale_ratio_stats"]["max"], 1.0)
+
+    def test_safe_relative_layout_masks_tokens_and_clamps_frames(self) -> None:
+        safety = RelativeLayoutSafetyConfig(
+            enabled=True,
+            relative_offset_min=-1.0,
+            relative_offset_max=1.0,
+            relative_log_scale_min=-0.5,
+            relative_log_scale_max=0.5,
+            scale_min=1.0,
+            scale_max=64.0,
+            origin_min=-16.0,
+            origin_max=272.0,
+        )
+        state = RelativeLayoutGrammarState(_topology_target(), config=ParseGraphTokenizerConfig(), safety_config=safety)
+        state.phase = "rel_log_scale"
+        allowed = state.allowed_token_strings()
+        self.assertLess(len(allowed), ParseGraphTokenizerConfig().scale_bins)
+
+        layout = {
+            "format": "maskgen_manual_layout_target_v1",
+            "target_type": "manual_parse_graph_layout_v1",
+            "size": [256, 256],
+            "nodes": [{"node_index": 0, "frame": {"origin": [1000.0, -1000.0], "scale": 100000.0, "orientation": 0.0}}],
+        }
+        safe_layout, diagnostics = sanitize_absolute_layout_target(layout, safety_config=safety)
+        frame = safe_layout["nodes"][0]["frame"]
+
+        self.assertLessEqual(frame["scale"], 64.0)
+        self.assertGreaterEqual(frame["origin"][0], 0.0)
+        self.assertLessEqual(frame["origin"][1], 256.0)
+        self.assertGreater(diagnostics["counts"]["scale_clamp_count"], 0)
 
 
 if __name__ == "__main__":

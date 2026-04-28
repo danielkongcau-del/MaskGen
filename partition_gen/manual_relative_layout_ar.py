@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from dataclasses import asdict, dataclass
 import copy
 import json
 import math
 from pathlib import Path
-from statistics import mean
+from statistics import mean, median
 from typing import Dict, Iterable, List, Sequence
 
 import torch
@@ -31,6 +32,7 @@ from partition_gen.parse_graph_tokenizer import (
     TokenReader,
     dequantize,
     int_token,
+    quantize,
     q_token,
     tokens_to_ids,
 )
@@ -40,6 +42,23 @@ REL_LAYOUT_CONDITION_TOKEN = "MANUAL_REL_LAYOUT_CONDITION_V1"
 REL_LAYOUT_TARGET_TOKEN = "REL_LAYOUT_TARGET"
 REL_LAYOUT_START_TOKEN = "MANUAL_REL_LAYOUT_V1"
 EPS = 1.0e-6
+
+
+@dataclass(frozen=True)
+class RelativeLayoutSafetyConfig:
+    enabled: bool = False
+    relative_offset_min: float = -4.0
+    relative_offset_max: float = 4.0
+    relative_log_scale_min: float = -3.0
+    relative_log_scale_max: float = 3.0
+    scale_min: float = 1.0
+    scale_max: float = 512.0
+    origin_min: float = -256.0
+    origin_max: float = 512.0
+    enforce_unit_bbox: bool = True
+
+    def to_dict(self) -> dict:
+        return asdict(self)
 
 
 def _geometry_targets_by_source_node_id(geometry_targets: Sequence[dict]) -> Dict[str, dict]:
@@ -58,6 +77,63 @@ def _wrap_angle(value: float) -> float:
 def _frame_origin(frame: dict) -> list[float]:
     origin = frame.get("origin", [0.0, 0.0]) or [0.0, 0.0]
     return [float(origin[0]), float(origin[1])]
+
+
+def _percentile(values: Sequence[float], percentile: float) -> float | None:
+    if not values:
+        return None
+    sorted_values = sorted(float(value) for value in values)
+    index = int(math.ceil(float(percentile) * len(sorted_values))) - 1
+    return float(sorted_values[max(0, min(index, len(sorted_values) - 1))])
+
+
+def _numeric_stats(values: Sequence[float]) -> dict:
+    if not values:
+        return {"count": 0, "mean": None, "min": None, "p50": None, "p95": None, "max": None}
+    floats = [float(value) for value in values]
+    return {
+        "count": int(len(floats)),
+        "mean": float(mean(floats)),
+        "min": float(min(floats)),
+        "p50": float(median(floats)),
+        "p95": _percentile(floats, 0.95),
+        "max": float(max(floats)),
+    }
+
+
+def _canvas_size(target: dict) -> tuple[float, float]:
+    size = target.get("size", [256, 256]) or [256, 256]
+    width = float(size[0]) if len(size) >= 1 else 256.0
+    height = float(size[1]) if len(size) >= 2 else width
+    return width, height
+
+
+def _origin_inside_canvas(frame: dict, *, width: float, height: float) -> bool:
+    origin_x, origin_y = _frame_origin(frame)
+    return 0.0 <= origin_x <= float(width) and 0.0 <= origin_y <= float(height)
+
+
+def _unit_bbox(frame: dict) -> list[float]:
+    origin_x, origin_y = _frame_origin(frame)
+    half = max(0.0, float(frame.get("scale", 1.0))) / 2.0
+    return [origin_x - half, origin_y - half, origin_x + half, origin_y + half]
+
+
+def _bbox_intersects_canvas(bbox: Sequence[float], *, width: float, height: float) -> bool:
+    min_x, min_y, max_x, max_y = [float(value) for value in bbox]
+    return max_x >= 0.0 and max_y >= 0.0 and min_x <= float(width) and min_y <= float(height)
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return float(min(float(high), max(float(low), float(value))))
+
+
+def _q_tokens_for_range(*, low: float, high: float, bins: int, value_min: float, value_max: float) -> list[str]:
+    start = quantize(float(value_min), low=float(low), high=float(high), bins=int(bins))
+    end = quantize(float(value_max), low=float(low), high=float(high), bins=int(bins))
+    if start > end:
+        start, end = end, start
+    return [f"Q_{index}" for index in range(int(start), int(end) + 1)]
 
 
 def _has_geometry_frame(node_id: str, geometry_by_id: Dict[str, dict]) -> bool:
@@ -520,6 +596,121 @@ def relative_layout_to_absolute_layout_target(relative_layout_target: dict) -> d
     }
 
 
+def sanitize_absolute_layout_target(
+    layout_target: dict,
+    *,
+    safety_config: RelativeLayoutSafetyConfig | None = None,
+) -> tuple[dict, dict]:
+    safety_config = safety_config or RelativeLayoutSafetyConfig(enabled=False)
+    if not bool(safety_config.enabled):
+        return copy.deepcopy(layout_target), {"enabled": False}
+
+    width, height = _canvas_size(layout_target)
+    output = copy.deepcopy(layout_target)
+    diagnostics = Counter()
+    for item in output.get("nodes", []) or []:
+        frame = item.get("frame", {}) or {}
+        origin = _frame_origin(frame)
+        scale_before = float(frame.get("scale", 1.0))
+        scale_after = _clamp(scale_before, float(safety_config.scale_min), float(safety_config.scale_max))
+        if scale_after != scale_before:
+            diagnostics["scale_clamp_count"] += 1
+        origin_after = [
+            _clamp(origin[0], float(safety_config.origin_min), float(safety_config.origin_max)),
+            _clamp(origin[1], float(safety_config.origin_min), float(safety_config.origin_max)),
+        ]
+        if origin_after != origin:
+            diagnostics["origin_clamp_count"] += 1
+        frame["origin"] = origin_after
+        frame["scale"] = scale_after
+        if bool(safety_config.enforce_unit_bbox) and not _bbox_intersects_canvas(_unit_bbox(frame), width=width, height=height):
+            frame["origin"] = [
+                _clamp(frame["origin"][0], 0.0, float(width)),
+                _clamp(frame["origin"][1], 0.0, float(height)),
+            ]
+            diagnostics["unit_bbox_origin_clamp_count"] += 1
+        item["frame"] = frame
+    return output, {
+        "enabled": True,
+        "config": safety_config.to_dict(),
+        "counts": dict(diagnostics),
+    }
+
+
+def relative_layout_numeric_diagnostics(relative_layout_target: dict, *, topology_target: dict | None = None) -> dict:
+    absolute_layout = relative_layout_to_absolute_layout_target(relative_layout_target)
+    width, height = _canvas_size(relative_layout_target)
+    absolute_by_index = {int(item["node_index"]): item["frame"] for item in absolute_layout.get("nodes", []) or []}
+    topology_nodes = list((topology_target or {}).get("parse_graph", {}).get("nodes", []) or [])
+    scales: list[float] = []
+    origin_xs: list[float] = []
+    origin_ys: list[float] = []
+    outside_count = 0
+    unit_bbox_visible_count = 0
+    dxs: list[float] = []
+    dys: list[float] = []
+    log_scale_ratios: list[float] = []
+    dthetas: list[float] = []
+    anchor_histogram: Counter[str] = Counter()
+    role_values = defaultdict(lambda: {"scales": [], "origin_outside": 0, "unit_bbox_visible": 0, "count": 0})
+
+    for row in relative_layout_target.get("nodes", []) or []:
+        node_index = int(row.get("node_index", -1))
+        anchor_mode = str(row.get("anchor_mode", "unknown"))
+        anchor_histogram[anchor_mode] += 1
+        if anchor_mode == "node":
+            relative_frame = row.get("relative_frame", {}) or {}
+            dxs.append(float(relative_frame.get("dx", 0.0)))
+            dys.append(float(relative_frame.get("dy", 0.0)))
+            log_scale_ratios.append(float(relative_frame.get("log_scale_ratio", 0.0)))
+            dthetas.append(float(relative_frame.get("dtheta", 0.0)))
+        frame = absolute_by_index.get(node_index)
+        if frame is None:
+            continue
+        origin = _frame_origin(frame)
+        origin_xs.append(origin[0])
+        origin_ys.append(origin[1])
+        scale = float(frame.get("scale", 1.0))
+        scales.append(scale)
+        origin_inside = _origin_inside_canvas(frame, width=width, height=height)
+        unit_bbox_visible = _bbox_intersects_canvas(_unit_bbox(frame), width=width, height=height)
+        outside_count += int(not origin_inside)
+        unit_bbox_visible_count += int(unit_bbox_visible)
+        role = str(topology_nodes[node_index].get("role", "unknown")) if 0 <= node_index < len(topology_nodes) else "unknown"
+        role_values[role]["count"] += 1
+        role_values[role]["scales"].append(scale)
+        role_values[role]["origin_outside"] += int(not origin_inside)
+        role_values[role]["unit_bbox_visible"] += int(unit_bbox_visible)
+
+    frame_count = int(len(scales))
+    return {
+        "format": "maskgen_manual_relative_layout_numeric_diagnostics_v1",
+        "frame_count": frame_count,
+        "anchor_mode_histogram": dict(anchor_histogram),
+        "scale_stats": _numeric_stats(scales),
+        "origin_x_stats": _numeric_stats(origin_xs),
+        "origin_y_stats": _numeric_stats(origin_ys),
+        "origin_outside_count": int(outside_count),
+        "origin_outside_ratio": float(outside_count / frame_count) if frame_count else 0.0,
+        "unit_bbox_visible_count": int(unit_bbox_visible_count),
+        "unit_bbox_visible_ratio": float(unit_bbox_visible_count / frame_count) if frame_count else 0.0,
+        "dx_stats": _numeric_stats(dxs),
+        "dy_stats": _numeric_stats(dys),
+        "log_scale_ratio_stats": _numeric_stats(log_scale_ratios),
+        "dtheta_stats": _numeric_stats(dthetas),
+        "role_numeric_metrics": {
+            role: {
+                "count": int(values["count"]),
+                "scale_stats": _numeric_stats(values["scales"]),
+                "origin_outside_ratio": float(values["origin_outside"] / values["count"]) if values["count"] else 0.0,
+                "unit_bbox_visible_ratio": float(values["unit_bbox_visible"] / values["count"]) if values["count"] else 0.0,
+            }
+            for role, values in sorted(role_values.items())
+        },
+        "absolute_frame_errors": list(absolute_layout.get("errors", []) or []),
+    }
+
+
 def validate_relative_layout_tokens(
     tokens: Sequence[str],
     *,
@@ -671,6 +862,16 @@ def evaluate_relative_layout_sample_rows(rows: Sequence[dict], *, top_k_invalid:
     role_errors = defaultdict(lambda: defaultdict(list))
     failure_histogram: Counter[str] = Counter()
     anchor_mode_histogram: Counter[str] = Counter()
+    sampled_scales: List[float] = []
+    sampled_origin_xs: List[float] = []
+    sampled_origin_ys: List[float] = []
+    sampled_origin_outside = 0
+    sampled_unit_bbox_visible = 0
+    sampled_frame_count = 0
+    sampled_dxs: List[float] = []
+    sampled_dys: List[float] = []
+    sampled_log_scale_ratios: List[float] = []
+    sampled_dthetas: List[float] = []
 
     for row_index, row in enumerate(rows):
         tokens = [str(token) for token in row.get("tokens", []) or []]
@@ -688,6 +889,29 @@ def evaluate_relative_layout_sample_rows(rows: Sequence[dict], *, top_k_invalid:
         node_counts.append(len(relative_layout.get("nodes", []) or []))
         anchor_mode_histogram.update(str(item.get("anchor_mode", "unknown")) for item in relative_layout.get("nodes", []) or [])
         absolute_layout = relative_layout_to_absolute_layout_target(relative_layout)
+        diagnostics = relative_layout_numeric_diagnostics(relative_layout, topology_target=topology_target)
+        sampled_scales.extend(
+            float(item["frame"].get("scale", 1.0))
+            for item in absolute_layout.get("nodes", []) or []
+            if "frame" in item
+        )
+        for item in absolute_layout.get("nodes", []) or []:
+            if "frame" not in item:
+                continue
+            origin = _frame_origin(item["frame"])
+            sampled_origin_xs.append(origin[0])
+            sampled_origin_ys.append(origin[1])
+        sampled_origin_outside += int(diagnostics["origin_outside_count"])
+        sampled_unit_bbox_visible += int(diagnostics["unit_bbox_visible_count"])
+        sampled_frame_count += int(diagnostics["frame_count"])
+        for item in relative_layout.get("nodes", []) or []:
+            if item.get("anchor_mode") != "node":
+                continue
+            relative_frame = item.get("relative_frame", {}) or {}
+            sampled_dxs.append(float(relative_frame.get("dx", 0.0)))
+            sampled_dys.append(float(relative_frame.get("dy", 0.0)))
+            sampled_log_scale_ratios.append(float(relative_frame.get("log_scale_ratio", 0.0)))
+            sampled_dthetas.append(float(relative_frame.get("dtheta", 0.0)))
         target_layout = row.get("target_layout")
         if target_layout is None:
             continue
@@ -721,6 +945,20 @@ def evaluate_relative_layout_sample_rows(rows: Sequence[dict], *, top_k_invalid:
         "scale_mae": avg(scale_errors),
         "orientation_mae": avg(orientation_errors),
         "anchor_mode_histogram": dict(anchor_mode_histogram),
+        "numeric_diagnostics": {
+            "frame_count": int(sampled_frame_count),
+            "scale_stats": _numeric_stats(sampled_scales),
+            "origin_x_stats": _numeric_stats(sampled_origin_xs),
+            "origin_y_stats": _numeric_stats(sampled_origin_ys),
+            "origin_outside_count": int(sampled_origin_outside),
+            "origin_outside_ratio": float(sampled_origin_outside / sampled_frame_count) if sampled_frame_count else 0.0,
+            "unit_bbox_visible_count": int(sampled_unit_bbox_visible),
+            "unit_bbox_visible_ratio": float(sampled_unit_bbox_visible / sampled_frame_count) if sampled_frame_count else 0.0,
+            "dx_stats": _numeric_stats(sampled_dxs),
+            "dy_stats": _numeric_stats(sampled_dys),
+            "log_scale_ratio_stats": _numeric_stats(sampled_log_scale_ratios),
+            "dtheta_stats": _numeric_stats(sampled_dthetas),
+        },
         "role_metrics": {
             role: {
                 "count": int(len(values["origin"])),
@@ -736,9 +974,16 @@ def evaluate_relative_layout_sample_rows(rows: Sequence[dict], *, top_k_invalid:
 
 
 class RelativeLayoutGrammarState:
-    def __init__(self, topology_target: dict, *, config: ParseGraphTokenizerConfig | None = None) -> None:
+    def __init__(
+        self,
+        topology_target: dict,
+        *,
+        config: ParseGraphTokenizerConfig | None = None,
+        safety_config: RelativeLayoutSafetyConfig | None = None,
+    ) -> None:
         self.topology_target = topology_target
         self.config = config or ParseGraphTokenizerConfig()
+        self.safety_config = safety_config or RelativeLayoutSafetyConfig(enabled=False)
         self.expected_node_indices = renderable_geometry_node_indices(topology_target)
         nodes = list((topology_target.get("parse_graph", {}) or {}).get("nodes", []) or [])
         geometry_stub_by_id = {
@@ -789,12 +1034,36 @@ class RelativeLayoutGrammarState:
         if self.phase in {"origin_x", "origin_y"}:
             return [f"Q_{index}" for index in range(int(self.config.position_bins))]
         if self.phase == "abs_scale":
+            if bool(self.safety_config.enabled):
+                return _q_tokens_for_range(
+                    low=self.config.scale_min,
+                    high=self.config.scale_max,
+                    bins=self.config.scale_bins,
+                    value_min=self.safety_config.scale_min,
+                    value_max=self.safety_config.scale_max,
+                )
             return [f"Q_{index}" for index in range(int(self.config.scale_bins))]
         if self.phase == "orientation":
             return [f"Q_{index}" for index in range(int(self.config.angle_bins))]
         if self.phase in {"rel_dx", "rel_dy"}:
+            if bool(self.safety_config.enabled):
+                return _q_tokens_for_range(
+                    low=self.config.relative_offset_min,
+                    high=self.config.relative_offset_max,
+                    bins=self.config.coord_bins,
+                    value_min=self.safety_config.relative_offset_min,
+                    value_max=self.safety_config.relative_offset_max,
+                )
             return [f"Q_{index}" for index in range(int(self.config.coord_bins))]
         if self.phase == "rel_log_scale":
+            if bool(self.safety_config.enabled):
+                return _q_tokens_for_range(
+                    low=self.config.relative_log_scale_min,
+                    high=self.config.relative_log_scale_max,
+                    bins=self.config.scale_bins,
+                    value_min=self.safety_config.relative_log_scale_min,
+                    value_max=self.safety_config.relative_log_scale_max,
+                )
             return [f"Q_{index}" for index in range(int(self.config.scale_bins))]
         if self.phase == "end_node":
             return ["END_NODE"]
@@ -858,6 +1127,8 @@ class RelativeLayoutGrammarState:
             "errors": list(self.errors),
             "node_count": int(self.node_count),
             "node_position": int(self.node_position),
+            "safe_sampling_enabled": bool(self.safety_config.enabled),
+            "safety_config": self.safety_config.to_dict() if bool(self.safety_config.enabled) else None,
         }
 
 
@@ -872,17 +1143,19 @@ def sample_relative_layout_constrained(
     temperature: float = 1.0,
     top_k: int | None = None,
     config: ParseGraphTokenizerConfig | None = None,
+    safety_config: RelativeLayoutSafetyConfig | None = None,
     device: torch.device | str | None = None,
     use_cache: bool = True,
 ) -> dict:
     config = config or ParseGraphTokenizerConfig()
+    safety_config = safety_config or RelativeLayoutSafetyConfig(enabled=False)
     inverse_vocab = {int(index): str(token) for token, index in vocab.items()}
     device = torch.device(device) if device is not None else next(model.parameters()).device
     prefix = list(prefix_tokens or relative_layout_condition_prefix_tokens(topology_target, config=config))
     missing = [token for token in prefix if token not in vocab]
     if missing:
         raise ValueError(f"Relative layout prefix contains tokens not in vocab: {missing}")
-    state = RelativeLayoutGrammarState(topology_target, config=config)
+    state = RelativeLayoutGrammarState(topology_target, config=config, safety_config=safety_config)
     ids = [int(vocab[token]) for token in prefix]
     tokens = [str(token) for token in prefix]
     stopped_reason = "max_new_tokens"
@@ -927,6 +1200,7 @@ def sample_relative_layout_constrained(
         "hit_eos": bool(tokens and tokens[-1] == "<EOS>"),
         "stopped_reason": stopped_reason,
         "constraint_diagnostics": state.diagnostics(),
+        "safety_config": safety_config.to_dict() if bool(safety_config.enabled) else None,
     }
 
 
@@ -940,6 +1214,7 @@ def sample_model_conditioned_relative_layout_rows(
     top_k: int | None,
     device,
     source_rows: Sequence[dict],
+    safety_config: RelativeLayoutSafetyConfig | None = None,
     progress_every: int = 0,
     progress_label: str = "relative_layout_sample",
 ) -> List[dict]:
@@ -963,12 +1238,15 @@ def sample_model_conditioned_relative_layout_rows(
                 temperature=float(temperature),
                 top_k=top_k,
                 device=device,
+                safety_config=safety_config,
             )
             rows.append(
                 {
                     "format": "maskgen_manual_relative_layout_sample_v1",
                     "sample_index": int(sample_index),
-                    "sampling_mode": "relative_layout_constrained",
+                    "sampling_mode": "relative_layout_safe_constrained"
+                    if bool((safety_config or RelativeLayoutSafetyConfig()).enabled)
+                    else "relative_layout_constrained",
                     "prefix_tokens": relative_layout_condition_prefix_from_tokens(source_tokens),
                     "length": int(len(sample["layout_tokens"])),
                     "conditioned_length": int(len(sample["tokens"])),
@@ -980,6 +1258,7 @@ def sample_model_conditioned_relative_layout_rows(
                     "topology_target": topology_target,
                     "target_layout": target_layout,
                     "constraint_diagnostics": sample.get("constraint_diagnostics"),
+                    "safety_config": sample.get("safety_config"),
                 }
             )
             if int(progress_every) > 0 and (sample_index + 1) % int(progress_every) == 0:
@@ -996,8 +1275,10 @@ def attach_relative_layout_frames_to_topology(
     *,
     shape_library: GeometryPlaceholderLibrary | None = None,
     geometry_by_node_id: Dict[str, dict] | None = None,
+    safety_config: RelativeLayoutSafetyConfig | None = None,
 ) -> tuple[dict, dict]:
     absolute_layout = relative_layout_to_absolute_layout_target(relative_layout_target)
+    absolute_layout, safety_diagnostics = sanitize_absolute_layout_target(absolute_layout, safety_config=safety_config)
     frame_by_index = {int(item["node_index"]): copy.deepcopy(item["frame"]) for item in absolute_layout.get("nodes", []) or []}
     graph = topology_target.get("parse_graph", {}) or {}
     output_nodes: List[dict] = []
@@ -1050,6 +1331,7 @@ def attach_relative_layout_frames_to_topology(
             "missing_geometry_count": int(missing),
             "attach_modes": dict(attach_modes),
             "relative_layout_errors": list(absolute_layout.get("errors", []) or []),
+            "relative_layout_safety": safety_diagnostics,
         },
     }
     return target, copy.deepcopy(target["metadata"])
@@ -1067,6 +1349,7 @@ def attach_relative_layout_to_topology_sample_rows(
     temperature: float = 0.8,
     top_k: int | None = 50,
     include_invalid: bool = False,
+    safety_config: RelativeLayoutSafetyConfig | None = None,
 ) -> list[dict]:
     targets: list[dict] = []
     for fallback_index, row in enumerate(rows):
@@ -1084,6 +1367,7 @@ def attach_relative_layout_to_topology_sample_rows(
             top_k=top_k,
             config=tokenizer_config,
             device=device,
+            safety_config=safety_config,
         )
         try:
             layout_target = decode_relative_layout_tokens_to_target(sample["layout_tokens"], config=tokenizer_config)
@@ -1095,6 +1379,7 @@ def attach_relative_layout_to_topology_sample_rows(
             topology_target,
             layout_target,
             shape_library=shape_library,
+            safety_config=safety_config,
         )
         target["metadata"].update(
             {

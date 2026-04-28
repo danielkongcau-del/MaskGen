@@ -260,19 +260,21 @@ This is a wrapper around `train_manual_geometry_ar.py` with `--sequence-kind rel
 
 Evaluates a relative layout AR checkpoint.
 
-It samples constrained `MANUAL_REL_LAYOUT_V1` sequences, reconstructs absolute frames from relative rows, and reports layout validity plus frame MAE against source token rows.
+It samples constrained `MANUAL_REL_LAYOUT_V1` sequences, reconstructs absolute frames from relative rows, and reports layout validity plus frame MAE against source token rows. The summary also includes numeric diagnostics for sampled frames: scale stats, origin outside ratio, unit-bbox visible ratio, and `dx` / `dy` / `log_scale_ratio` distributions.
+
+Pass `--safe-relative-layout` to mask relative `dx` / `dy` / `log_scale_ratio` token ranges during sampling for diagnostic runs.
 
 ### `scripts/attach_relative_layout_ar_to_split_targets.py`
 
 Attaches relative-layout-AR predicted frames to true split topology using true local shapes.
 
-Use this to isolate relative layout quality before introducing generated topology or placeholder shape noise.
+Use this to isolate relative layout quality before introducing generated topology or placeholder shape noise. Pass `--safe-relative-layout` to use the same safe token masks and clamp decoded frames before attaching; `summary.json` records the safety config and clamp counts.
 
 ### `scripts/attach_relative_layout_ar_to_topology_samples.py`
 
 Attaches relative-layout-AR predicted frames plus placeholder local shapes to generated topology samples.
 
-It decodes generated topology rows, samples constrained `MANUAL_REL_LAYOUT_V1`, reconstructs absolute frames from relative anchors, and retrieves local shapes by `(role, label, geometry_model)` from a split dataset.
+It decodes generated topology rows, samples constrained `MANUAL_REL_LAYOUT_V1`, reconstructs absolute frames from relative anchors, and retrieves local shapes by `(role, label, geometry_model)` from a split dataset. It also supports `--safe-relative-layout` for the diagnostic safe sampler path.
 
 ### `scripts/train_manual_layout_frame.py`
 

@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 from partition_gen.manual_ar_training import load_checkpoint  # noqa: E402
 from partition_gen.manual_geometry_conditioning import iter_jsonl, load_json, _resolve_path  # noqa: E402
 from partition_gen.manual_relative_layout_ar import (  # noqa: E402
+    RelativeLayoutSafetyConfig,
     attach_relative_layout_frames_to_topology,
     decode_relative_layout_tokens_to_target,
     sample_relative_layout_constrained,
@@ -32,6 +33,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.8)
     parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--safe-relative-layout", action="store_true")
+    parser.add_argument("--safe-relative-offset-min", type=float, default=-4.0)
+    parser.add_argument("--safe-relative-offset-max", type=float, default=4.0)
+    parser.add_argument("--safe-relative-log-scale-min", type=float, default=-3.0)
+    parser.add_argument("--safe-relative-log-scale-max", type=float, default=3.0)
+    parser.add_argument("--safe-scale-min", type=float, default=1.0)
+    parser.add_argument("--safe-scale-max", type=float, default=512.0)
+    parser.add_argument("--safe-origin-min", type=float, default=-256.0)
+    parser.add_argument("--safe-origin-max", type=float, default=512.0)
+    parser.add_argument("--safe-enforce-unit-bbox", action=argparse.BooleanOptionalAction, default=True)
     return parser.parse_args()
 
 
@@ -56,6 +67,21 @@ def _resolve_vocab_path(checkpoint: dict) -> Path:
     return candidate if candidate.exists() else vocab_path
 
 
+def _relative_layout_safety_config(args: argparse.Namespace) -> RelativeLayoutSafetyConfig:
+    return RelativeLayoutSafetyConfig(
+        enabled=bool(args.safe_relative_layout),
+        relative_offset_min=float(args.safe_relative_offset_min),
+        relative_offset_max=float(args.safe_relative_offset_max),
+        relative_log_scale_min=float(args.safe_relative_log_scale_min),
+        relative_log_scale_max=float(args.safe_relative_log_scale_max),
+        scale_min=float(args.safe_scale_min),
+        scale_max=float(args.safe_scale_max),
+        origin_min=float(args.safe_origin_min),
+        origin_max=float(args.safe_origin_max),
+        enforce_unit_bbox=bool(args.safe_enforce_unit_bbox),
+    )
+
+
 def main() -> None:
     args = parse_args()
     checkpoint, model, _optimizer = load_checkpoint(args.layout_checkpoint, map_location="cpu", load_optimizer=False)
@@ -64,12 +90,14 @@ def main() -> None:
     model = model.to(device)
     model.eval()
     tokenizer_config = ParseGraphTokenizerConfig()
+    safety_config = _relative_layout_safety_config(args)
     manifest_path = args.split_root / "manifest.jsonl"
     rows = list(iter_jsonl(manifest_path))
     if args.max_samples is not None:
         rows = rows[: int(args.max_samples)]
     manifest_rows = []
     attach_modes: Counter[str] = Counter()
+    safety_counts: Counter[str] = Counter()
     attached_total = 0
     missing_total = 0
     valid_layout_count = 0
@@ -91,6 +119,7 @@ def main() -> None:
             top_k=int(args.top_k) if int(args.top_k) > 0 else None,
             config=tokenizer_config,
             device=device,
+            safety_config=safety_config,
         )
         hit_eos_count += int(bool(sample.get("hit_eos", False)))
         layout_valid = False
@@ -104,6 +133,7 @@ def main() -> None:
             topology_target,
             layout_target,
             geometry_by_node_id=geometry_by_id,
+            safety_config=safety_config,
         )
         target["metadata"].update(
             {
@@ -114,6 +144,7 @@ def main() -> None:
             }
         )
         attach_modes.update(diagnostics.get("attach_modes", {}))
+        safety_counts.update((diagnostics.get("relative_layout_safety", {}) or {}).get("counts", {}))
         attached_total += int(diagnostics.get("attached_geometry_count", 0))
         missing_total += int(diagnostics.get("missing_geometry_count", 0))
         output_path = args.output_root / "graphs" / f"sample_{index:06d}.json"
@@ -129,6 +160,8 @@ def main() -> None:
         "attached_geometry_count": int(attached_total),
         "missing_geometry_count": int(missing_total),
         "attach_modes": dict(attach_modes),
+        "relative_layout_safety": safety_config.to_dict(),
+        "relative_layout_safety_counts": dict(safety_counts),
         "split_root": str(args.split_root.as_posix()),
         "layout_checkpoint": str(args.layout_checkpoint.as_posix()),
         "output_root": str(args.output_root.as_posix()),
