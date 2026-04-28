@@ -250,6 +250,12 @@ Attaches layout-AR predicted frames plus placeholder local shapes to generated t
 
 It decodes generated topology rows, samples constrained `MANUAL_LAYOUT_V1`, attaches predicted frames, and retrieves local shapes by `(role, label, geometry_model)` from a split dataset.
 
+### `scripts/attach_retrieved_layout_to_split_targets.py`
+
+Attaches nearest-neighbor retrieved train layouts to split targets using true local shapes.
+
+It builds a retrieval library from `--library-split-root`, scores topology signatures against each query topology from `--split-root`, copies frames from the nearest train layout by `role` / `label` / `geometry_model` order, and falls back to train-set median frames when a target node has no match. Use this as a layout retrieval baseline before training another layout generator.
+
 ### `scripts/train_manual_relative_layout_ar.py`
 
 Trains the relative layout AR generator.
