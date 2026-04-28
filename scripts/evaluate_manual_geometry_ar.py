@@ -14,7 +14,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from partition_gen.manual_ar_training import load_checkpoint  # noqa: E402
-from partition_gen.manual_geometry_conditioned_evaluation import sample_model_conditioned_geometry_rows  # noqa: E402
+from partition_gen.manual_geometry_conditioned_evaluation import (  # noqa: E402
+    sample_model_conditioned_geometry_rows,
+    sample_model_oracle_frame_geometry_rows,
+)
 from partition_gen.manual_geometry_constrained_sampling import GeometryConstrainedSamplerConfig  # noqa: E402
 from partition_gen.manual_geometry_evaluation import (  # noqa: E402
     evaluate_geometry_sample_rows,
@@ -22,6 +25,7 @@ from partition_gen.manual_geometry_evaluation import (  # noqa: E402
     write_geometry_sample_evaluation_markdown,
     write_geometry_sample_rows,
 )
+from partition_gen.manual_layout_ar import evaluate_layout_sample_rows, sample_model_conditioned_layout_rows  # noqa: E402
 from partition_gen.manual_split_token_dataset import ManualSplitTokenSequenceDataset  # noqa: E402
 from partition_gen.parse_graph_tokenizer import load_vocabulary  # noqa: E402
 
@@ -33,7 +37,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--summary-md", type=Path, required=True)
     parser.add_argument("--output-samples", type=Path, default=None)
     parser.add_argument("--token-root", type=Path, default=None, help="Optional token root used to source forced geometry prefixes.")
-    parser.add_argument("--sequence-kind", type=str, default="auto", choices=["auto", "geometry", "conditioned_geometry"])
+    parser.add_argument(
+        "--sequence-kind",
+        type=str,
+        default="auto",
+        choices=["auto", "geometry", "conditioned_geometry", "oracle_frame_geometry", "layout"],
+    )
     parser.add_argument("--num-samples", type=int, default=100)
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=0.8)
@@ -121,6 +130,39 @@ def main() -> None:
             progress_every=int(args.progress_every),
             progress_label="conditioned_geometry_eval",
         )
+    elif sequence_kind == "oracle_frame_geometry":
+        if not bool(args.constrained):
+            raise RuntimeError("oracle_frame_geometry evaluation currently requires constrained sampling")
+        if source_rows is None:
+            raise RuntimeError("oracle_frame_geometry evaluation requires --token-root or checkpoint train_config token root")
+        rows = sample_model_oracle_frame_geometry_rows(
+            model,
+            vocab,
+            num_samples=int(args.num_samples),
+            max_new_tokens=int(args.max_new_tokens),
+            temperature=float(args.temperature),
+            top_k=int(args.top_k) if int(args.top_k) > 0 else None,
+            device=device,
+            source_rows=source_rows,
+            constraint_config=constraint_config,
+            progress_every=int(args.progress_every),
+            progress_label="oracle_frame_geometry_eval",
+        )
+    elif sequence_kind == "layout":
+        if source_rows is None:
+            raise RuntimeError("layout evaluation requires --token-root or checkpoint train_config token root")
+        rows = sample_model_conditioned_layout_rows(
+            model,
+            vocab,
+            num_samples=int(args.num_samples),
+            max_new_tokens=int(args.max_new_tokens),
+            temperature=float(args.temperature),
+            top_k=int(args.top_k) if int(args.top_k) > 0 else None,
+            device=device,
+            source_rows=source_rows,
+            progress_every=int(args.progress_every),
+            progress_label="layout_eval",
+        )
     else:
         rows = sample_model_geometry_rows(
             model,
@@ -149,7 +191,10 @@ def main() -> None:
             "constraint_config": None if constraint_config is None else constraint_config.__dict__,
             "token_root": None if token_root is None else str(token_root.as_posix()),
         }
-    summary = evaluate_geometry_sample_rows(rows, top_k_invalid=int(args.top_k_invalid))
+    if sequence_kind == "layout":
+        summary = evaluate_layout_sample_rows(rows, top_k_invalid=int(args.top_k_invalid))
+    else:
+        summary = evaluate_geometry_sample_rows(rows, top_k_invalid=int(args.top_k_invalid))
     summary.update(
         {
             "checkpoint": str(args.checkpoint.as_posix()),
@@ -162,11 +207,25 @@ def main() -> None:
     )
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     args.output_json.write_text(json.dumps(summary, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
-    write_geometry_sample_evaluation_markdown(summary, args.summary_md)
+    if sequence_kind == "layout":
+        lines = [
+            "# Manual Layout AR Evaluation",
+            "",
+            f"- samples: {summary.get('sample_count')}",
+            f"- valid: {summary.get('valid_count')} ({summary.get('valid_rate')})",
+            f"- hit_eos: {summary.get('hit_eos_count')}",
+            f"- origin MAE: {summary.get('origin_mae')}",
+            f"- scale MAE: {summary.get('scale_mae')}",
+            f"- orientation MAE: {summary.get('orientation_mae')}",
+        ]
+        args.summary_md.parent.mkdir(parents=True, exist_ok=True)
+        args.summary_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        write_geometry_sample_evaluation_markdown(summary, args.summary_md)
     if args.output_samples is not None:
         write_geometry_sample_rows(args.output_samples, rows)
     print(
-        f"evaluated geometry samples={summary['sample_count']} valid={summary['valid_count']} "
+        f"evaluated {sequence_kind} samples={summary['sample_count']} valid={summary['valid_count']} "
         f"valid_rate={summary['valid_rate']:.4f} hit_eos={summary['hit_eos_count']} output={args.output_json}"
     )
 

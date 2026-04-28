@@ -176,19 +176,31 @@ It supports both unconstrained and constrained sampling. The constrained sampler
 
 Trains the per-node manual geometry AR Transformer.
 
-It reuses the same AR Transformer and manual split token dataloader as topology training. Use the default `--sequence-kind geometry` for v0 role/label/model-conditioned geometry from `geometry_sequences.jsonl`, or `--sequence-kind conditioned_geometry` for topology-conditioned v1 rows from `conditioned_geometry_sequences.jsonl`. Optional `--geometry-eval-samples` runs constrained forced-prefix sampling during training and validates the extracted geometry payloads.
+It reuses the same AR Transformer and manual split token dataloader as topology training. Use the default `--sequence-kind geometry` for v0 role/label/model-conditioned geometry from `geometry_sequences.jsonl`, `--sequence-kind conditioned_geometry` for topology-conditioned v1 rows, `--sequence-kind oracle_frame_geometry` for oracle-frame local shape rows, or `--sequence-kind layout` for absolute layout rows. Optional `--geometry-eval-samples` runs constrained forced-prefix sampling during training and validates extracted payloads.
 
 ### `scripts/evaluate_manual_geometry_ar.py`
 
 Samples a manual geometry AR checkpoint and writes validity metrics for generated `MANUAL_GEOMETRY_V1` sequences.
 
-By default it uses constrained sampling with forced prefixes from a geometry token root, then validates decode/re-encode roundtrips, EOS rate, polygon counts, hole counts, atom counts, point counts, and role/label/model histograms. If no token root is available, it can sample from an explicit `--prefix-role`, `--prefix-label`, and `--prefix-geometry-model`. With `--sequence-kind conditioned_geometry`, it samples topology-conditioned geometry prefixes and evaluates the extracted `MANUAL_GEOMETRY_V1` payloads.
+By default it uses constrained sampling with forced prefixes from a geometry token root, then validates decode/re-encode roundtrips, EOS rate, polygon counts, hole counts, atom counts, point counts, and role/label/model histograms. If no token root is available, it can sample from an explicit `--prefix-role`, `--prefix-label`, and `--prefix-geometry-model`. With `--sequence-kind conditioned_geometry` or `oracle_frame_geometry`, it samples topology-conditioned prefixes and evaluates extracted `MANUAL_GEOMETRY_V1` payloads. With `--sequence-kind layout`, it samples/evaluates `MANUAL_LAYOUT_V1` rows.
 
 ### `scripts/tokenize_manual_conditioned_geometry_dataset.py`
 
 Builds topology-conditioned geometry token sequences from a topology/geometry split target dataset.
 
 Each row contains a full `MANUAL_TOPOLOGY_V1` context, a `TARGET_NODE` index, and that node's `MANUAL_GEOMETRY_V1` payload. The row includes `loss_start_index` so training can mask condition-token loss and optimize only the generated geometry suffix.
+
+### `scripts/tokenize_manual_oracle_frame_geometry_dataset.py`
+
+Builds oracle-frame local geometry token sequences.
+
+Each row contains topology context, target node index, and a forced geometry prefix through true `FRAME`. The row's `loss_start_index` points at `POLYS` or `ATOMS`, so the model learns only local shape and does not predict frame.
+
+### `scripts/tokenize_manual_layout_dataset.py`
+
+Builds topology-conditioned absolute layout token sequences.
+
+Each row contains topology context followed by one `MANUAL_LAYOUT_V1` target for all renderable `geometry_ref` nodes in topology node order. The target contains absolute `FRAME` bins only.
 
 ### `scripts/attach_generated_geometry_to_topology_samples.py`
 
@@ -201,6 +213,36 @@ It decodes semantic-valid `MANUAL_TOPOLOGY_V1` rows, finds renderable nodes with
 Attaches topology-conditioned generated geometry to generated topology samples.
 
 It decodes semantic-valid `MANUAL_TOPOLOGY_V1` rows and, for each renderable node with `geometry_ref`, builds a full topology-conditioned prefix containing the decoded topology and target node index before constrained geometry sampling. This is the v1 learned-geometry attachment path.
+
+### `scripts/attach_oracle_frame_geometry_to_split_targets.py`
+
+Attaches generated local geometry to true split topology while preserving true frames.
+
+It uses an oracle-frame geometry checkpoint to sample only the local `POLYS`/`ATOMS` suffix, writes the true split `frame` back into decoded geometry targets, and reconstructs full parse graphs for spatial audit and visualization.
+
+### `scripts/train_manual_layout_ar.py`
+
+Trains the absolute layout AR generator.
+
+This is a wrapper around `train_manual_geometry_ar.py` with `--sequence-kind layout` and default output root `outputs/manual_layout_ar`.
+
+### `scripts/evaluate_manual_layout_ar.py`
+
+Evaluates an absolute layout AR checkpoint.
+
+This is a wrapper around `evaluate_manual_geometry_ar.py` with `--sequence-kind layout`, reporting layout validity and frame MAE when source token rows include targets.
+
+### `scripts/attach_layout_ar_to_split_targets.py`
+
+Attaches layout-AR predicted frames to true split topology using true local shapes.
+
+Use this to isolate layout quality without local shape noise before testing generated topology.
+
+### `scripts/attach_layout_ar_to_topology_samples.py`
+
+Attaches layout-AR predicted frames plus placeholder local shapes to generated topology samples.
+
+It decodes generated topology rows, samples constrained `MANUAL_LAYOUT_V1`, attaches predicted frames, and retrieves local shapes by `(role, label, geometry_model)` from a split dataset.
 
 ### `scripts/train_manual_layout_frame.py`
 

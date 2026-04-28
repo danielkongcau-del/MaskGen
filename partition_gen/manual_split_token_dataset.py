@@ -30,8 +30,11 @@ class ManualSplitTokenSequenceDataset(Dataset):
         max_length: int | None = None,
     ) -> None:
         self.token_root = Path(token_root)
-        if sequence_kind not in {"topology", "geometry", "conditioned_geometry"}:
-            raise ValueError(f"sequence_kind must be topology, geometry, or conditioned_geometry, got {sequence_kind}")
+        if sequence_kind not in {"topology", "geometry", "conditioned_geometry", "oracle_frame_geometry", "layout"}:
+            raise ValueError(
+                "sequence_kind must be topology, geometry, conditioned_geometry, "
+                f"oracle_frame_geometry, or layout, got {sequence_kind}"
+            )
         self.sequence_kind = sequence_kind
         self.vocab = load_vocabulary(self.token_root / "vocab.json")
         self.pad_id = int(self.vocab["<PAD>"])
@@ -40,6 +43,8 @@ class ManualSplitTokenSequenceDataset(Dataset):
             "topology": "topology_sequences.jsonl",
             "geometry": "geometry_sequences.jsonl",
             "conditioned_geometry": "conditioned_geometry_sequences.jsonl",
+            "oracle_frame_geometry": "oracle_frame_geometry_sequences.jsonl",
+            "layout": "layout_sequences.jsonl",
         }
         filename = filename_by_kind[sequence_kind]
         rows = _read_jsonl(self.token_root / filename)

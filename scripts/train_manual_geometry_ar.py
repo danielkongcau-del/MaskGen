@@ -26,11 +26,15 @@ from partition_gen.manual_ar_training import (  # noqa: E402
     save_json,
 )
 from partition_gen.manual_geometry_constrained_sampling import GeometryConstrainedSamplerConfig  # noqa: E402
-from partition_gen.manual_geometry_conditioned_evaluation import sample_model_conditioned_geometry_rows  # noqa: E402
+from partition_gen.manual_geometry_conditioned_evaluation import (  # noqa: E402
+    sample_model_conditioned_geometry_rows,
+    sample_model_oracle_frame_geometry_rows,
+)
 from partition_gen.manual_geometry_evaluation import (  # noqa: E402
     evaluate_geometry_sample_rows,
     sample_model_geometry_rows,
 )
+from partition_gen.manual_layout_ar import evaluate_layout_sample_rows, sample_model_conditioned_layout_rows  # noqa: E402
 from partition_gen.manual_split_token_dataset import (  # noqa: E402
     ManualSplitTokenSequenceDataset,
     collate_manual_split_token_sequences,
@@ -42,7 +46,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train per-node manual geometry AR Transformer.")
     parser.add_argument("--train-token-root", type=Path, default=Path("data/remote_256_generator_tokens_manual_split_full/train"))
     parser.add_argument("--val-token-root", type=Path, default=Path("data/remote_256_generator_tokens_manual_split_full/val"))
-    parser.add_argument("--sequence-kind", type=str, default="geometry", choices=["geometry", "conditioned_geometry"])
+    parser.add_argument(
+        "--sequence-kind",
+        type=str,
+        default="geometry",
+        choices=["geometry", "conditioned_geometry", "oracle_frame_geometry", "layout"],
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/manual_geometry_ar"))
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--block-size", type=int, default=1024)
@@ -125,6 +134,18 @@ def compact_geometry_eval_metrics(summary: dict) -> dict:
         "valid_length_mean": valid_lengths.get("mean"),
         "point_total_mean": point_totals.get("mean"),
         "point_total_p95": point_totals.get("p95"),
+    }
+
+
+def compact_layout_eval_metrics(summary: dict) -> dict:
+    return {
+        "layout_valid_rate": float(summary.get("valid_rate", 0.0)),
+        "layout_valid_count": int(summary.get("valid_count", 0)),
+        "layout_sample_count": int(summary.get("sample_count", 0)),
+        "layout_hit_eos_count": int(summary.get("hit_eos_count", 0)),
+        "layout_origin_mae": summary.get("origin_mae"),
+        "layout_scale_mae": summary.get("scale_mae"),
+        "layout_orientation_mae": summary.get("orientation_mae"),
     }
 
 
@@ -267,6 +288,76 @@ def main() -> None:
                         progress_every=int(args.geometry_eval_progress_every),
                         progress_label=f"conditioned_geometry_eval_iter_{iter_num}",
                     )
+                    summary = evaluate_geometry_sample_rows(rows, top_k_invalid=10)
+                    save_json(output_dir / f"geometry_eval_iter_{iter_num}.json", summary)
+                    metrics.update(compact_geometry_eval_metrics(summary))
+                    current_valid = float(summary["valid_rate"])
+                    if best_geometry_valid_rate is None or current_valid > best_geometry_valid_rate:
+                        best_geometry_valid_rate = current_valid
+                        save_checkpoint(
+                            output_dir / "ckpt_best_geometry_valid.pt",
+                            model=model,
+                            optimizer=optimizer,
+                            scaler=scaler,
+                            iter_num=iter_num,
+                            best_val_loss=min(best_val_loss, val_loss),
+                            model_config=model_config,
+                            train_config=train_config,
+                            vocab_path=args.train_token_root / "vocab.json",
+                            special_token_ids=special_token_ids,
+                            metrics=metrics,
+                            checkpoint_format="maskgen_manual_geometry_ar_checkpoint_v1",
+                        )
+                elif str(args.sequence_kind) == "oracle_frame_geometry":
+                    rows = sample_model_oracle_frame_geometry_rows(
+                        model,
+                        vocab,
+                        num_samples=int(args.geometry_eval_samples),
+                        max_new_tokens=int(args.geometry_eval_max_new_tokens),
+                        temperature=float(args.geometry_eval_temperature),
+                        top_k=int(args.geometry_eval_top_k) if int(args.geometry_eval_top_k) > 0 else None,
+                        device=device,
+                        source_rows=val_dataset.rows,
+                        constraint_config=GeometryConstrainedSamplerConfig(),
+                        progress_every=int(args.geometry_eval_progress_every),
+                        progress_label=f"oracle_frame_geometry_eval_iter_{iter_num}",
+                    )
+                    summary = evaluate_geometry_sample_rows(rows, top_k_invalid=10)
+                    save_json(output_dir / f"geometry_eval_iter_{iter_num}.json", summary)
+                    metrics.update(compact_geometry_eval_metrics(summary))
+                    current_valid = float(summary["valid_rate"])
+                    if best_geometry_valid_rate is None or current_valid > best_geometry_valid_rate:
+                        best_geometry_valid_rate = current_valid
+                        save_checkpoint(
+                            output_dir / "ckpt_best_geometry_valid.pt",
+                            model=model,
+                            optimizer=optimizer,
+                            scaler=scaler,
+                            iter_num=iter_num,
+                            best_val_loss=min(best_val_loss, val_loss),
+                            model_config=model_config,
+                            train_config=train_config,
+                            vocab_path=args.train_token_root / "vocab.json",
+                            special_token_ids=special_token_ids,
+                            metrics=metrics,
+                            checkpoint_format="maskgen_manual_geometry_ar_checkpoint_v1",
+                        )
+                elif str(args.sequence_kind) == "layout":
+                    rows = sample_model_conditioned_layout_rows(
+                        model,
+                        vocab,
+                        num_samples=int(args.geometry_eval_samples),
+                        max_new_tokens=int(args.geometry_eval_max_new_tokens),
+                        temperature=float(args.geometry_eval_temperature),
+                        top_k=int(args.geometry_eval_top_k) if int(args.geometry_eval_top_k) > 0 else None,
+                        device=device,
+                        source_rows=val_dataset.rows,
+                        progress_every=int(args.geometry_eval_progress_every),
+                        progress_label=f"layout_eval_iter_{iter_num}",
+                    )
+                    summary = evaluate_layout_sample_rows(rows, top_k_invalid=10)
+                    save_json(output_dir / f"layout_eval_iter_{iter_num}.json", summary)
+                    metrics.update(compact_layout_eval_metrics(summary))
                 else:
                     rows = sample_model_geometry_rows(
                         model,
@@ -281,26 +372,26 @@ def main() -> None:
                         progress_every=int(args.geometry_eval_progress_every),
                         progress_label=f"geometry_eval_iter_{iter_num}",
                     )
-                summary = evaluate_geometry_sample_rows(rows, top_k_invalid=10)
-                save_json(output_dir / f"geometry_eval_iter_{iter_num}.json", summary)
-                metrics.update(compact_geometry_eval_metrics(summary))
-                current_valid = float(summary["valid_rate"])
-                if best_geometry_valid_rate is None or current_valid > best_geometry_valid_rate:
-                    best_geometry_valid_rate = current_valid
-                    save_checkpoint(
-                        output_dir / "ckpt_best_geometry_valid.pt",
-                        model=model,
-                        optimizer=optimizer,
-                        scaler=scaler,
-                        iter_num=iter_num,
-                        best_val_loss=min(best_val_loss, val_loss),
-                        model_config=model_config,
-                        train_config=train_config,
-                        vocab_path=args.train_token_root / "vocab.json",
-                        special_token_ids=special_token_ids,
-                        metrics=metrics,
-                        checkpoint_format="maskgen_manual_geometry_ar_checkpoint_v1",
-                    )
+                    summary = evaluate_geometry_sample_rows(rows, top_k_invalid=10)
+                    save_json(output_dir / f"geometry_eval_iter_{iter_num}.json", summary)
+                    metrics.update(compact_geometry_eval_metrics(summary))
+                    current_valid = float(summary["valid_rate"])
+                    if best_geometry_valid_rate is None or current_valid > best_geometry_valid_rate:
+                        best_geometry_valid_rate = current_valid
+                        save_checkpoint(
+                            output_dir / "ckpt_best_geometry_valid.pt",
+                            model=model,
+                            optimizer=optimizer,
+                            scaler=scaler,
+                            iter_num=iter_num,
+                            best_val_loss=min(best_val_loss, val_loss),
+                            model_config=model_config,
+                            train_config=train_config,
+                            vocab_path=args.train_token_root / "vocab.json",
+                            special_token_ids=special_token_ids,
+                            metrics=metrics,
+                            checkpoint_format="maskgen_manual_geometry_ar_checkpoint_v1",
+                        )
             append_jsonl(output_dir / "eval_log.jsonl", {"iter": int(iter_num), **metrics})
             if val_loss < best_val_loss:
                 best_val_loss = float(val_loss)
