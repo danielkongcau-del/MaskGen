@@ -5,6 +5,11 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from partition_gen.manual_geometry_oracle_frame_conditioning import (
+    encode_oracle_frame_conditioned_geometry_target,
+    extract_geometry_tokens_from_oracle_frame_conditioned,
+)
+from partition_gen.manual_geometry_sample_validation import decode_geometry_tokens_to_target
 from partition_gen.manual_layout_retrieval import (
     attach_retrieved_layout_to_split_targets,
     build_layout_retrieval_fallbacks,
@@ -12,6 +17,7 @@ from partition_gen.manual_layout_retrieval import (
     map_retrieved_layout_frames,
     retrieve_layout_entry,
 )
+from partition_gen.parse_graph_tokenizer import ParseGraphTokenizerConfig
 
 
 def _topology_target(*, stem: str, insert_label: int = 1, include_divider: bool = False) -> dict:
@@ -154,6 +160,40 @@ class ManualLayoutRetrievalTest(unittest.TestCase):
             self.assertEqual(nodes_by_id["val_a_support"]["frame"]["origin"], [128.0, 128.0])
             self.assertEqual(nodes_by_id["val_a_insert"]["geometry"]["outer_local"][0], [-0.5, -0.5])
             self.assertEqual(targets[0]["parse_graph"]["relations"], _topology_target(stem="val_a")["parse_graph"]["relations"])
+
+    def test_retrieved_frame_can_condition_local_geometry_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            train = Path(tmpdir) / "split" / "train"
+            train.mkdir(parents=True)
+            _write_split_row(
+                train,
+                stem="train_a",
+                topology=_topology_target(stem="train_a", insert_label=1),
+                origins=[[128.0, 128.0], [96.0, 96.0]],
+            )
+            library, _summary = build_layout_retrieval_library(train)
+            fallback = build_layout_retrieval_fallbacks(library)
+            query = _topology_target(stem="query", insert_label=1)
+            retrieved, _score = retrieve_layout_entry(query, library)
+            frame_by_index, _diagnostics = map_retrieved_layout_frames(query, retrieved, fallback_frames=fallback)
+            geometry = _geometry_target("query_support", "support_region", 0, [10.0, 10.0])
+            geometry["frame"] = frame_by_index[0]
+            config = ParseGraphTokenizerConfig()
+
+            conditioned_tokens = encode_oracle_frame_conditioned_geometry_target(
+                query,
+                geometry,
+                target_node_index=0,
+                config=config,
+            )
+            decoded = decode_geometry_tokens_to_target(
+                extract_geometry_tokens_from_oracle_frame_conditioned(conditioned_tokens),
+                config=config,
+                source_node_id="query_support",
+            )
+
+            self.assertAlmostEqual(decoded["frame"]["origin"][0], 128.0, delta=0.3)
+            self.assertAlmostEqual(decoded["frame"]["origin"][1], 128.0, delta=0.3)
 
 
 if __name__ == "__main__":

@@ -256,6 +256,12 @@ Attaches nearest-neighbor retrieved train layouts to split targets using true lo
 
 It builds a retrieval library from `--library-split-root`, scores topology signatures against each query topology from `--split-root`, copies frames from the nearest train layout by `role` / `label` / `geometry_model` order, and falls back to train-set median frames when a target node has no match. Use this as a layout retrieval baseline before training another layout generator.
 
+### `scripts/attach_retrieved_layout_oracle_frame_geometry_to_split_targets.py`
+
+Attaches generated local geometry to split topology using retrieved train-layout frames.
+
+It first retrieves a nearest-neighbor train layout for each query topology, then uses those retrieved frames as the forced `FRAME` prefix for the oracle-frame geometry checkpoint. The geometry model samples only local `POLYS`/`ATOMS`, so this tests the proposed pipeline of generated topology, retrieved layout, and generated local shape without asking the geometry model to invent absolute frame placement.
+
 ### `scripts/train_manual_relative_layout_ar.py`
 
 Trains the relative layout AR generator.
