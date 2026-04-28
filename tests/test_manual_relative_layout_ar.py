@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 import tempfile
@@ -146,6 +147,23 @@ class ManualRelativeLayoutARTest(unittest.TestCase):
         divider_anchor = relative_layout_anchor_for_node(_topology_target(), 4, geometry_by_id)
 
         self.assertEqual(support_anchor["anchor_mode"], "global")
+        self.assertEqual(insert_anchor["anchor_mode"], "node")
+        self.assertEqual(insert_anchor["anchor_node_index"], 0)
+        self.assertEqual(divider_anchor["anchor_mode"], "node")
+        self.assertEqual(divider_anchor["anchor_node_index"], 0)
+
+    def test_anchor_rules_support_legacy_relation_fields(self) -> None:
+        geometry_by_id = {target["source_node_id"]: target for target in _geometry_targets()}
+        topology = copy.deepcopy(_topology_target())
+        for relation in topology["parse_graph"]["relations"]:
+            if relation.get("type") == "inserted_in":
+                relation["support"] = relation.pop("container")
+            if relation.get("type") == "divides":
+                relation["support"] = relation.pop("target")
+
+        insert_anchor = relative_layout_anchor_for_node(topology, 3, geometry_by_id)
+        divider_anchor = relative_layout_anchor_for_node(topology, 4, geometry_by_id)
+
         self.assertEqual(insert_anchor["anchor_mode"], "node")
         self.assertEqual(insert_anchor["anchor_node_index"], 0)
         self.assertEqual(divider_anchor["anchor_mode"], "node")

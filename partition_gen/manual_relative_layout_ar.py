@@ -25,6 +25,7 @@ from partition_gen.manual_topology_placeholder_geometry import (
 )
 from partition_gen.manual_topology_sample_validation import validate_topology_tokens
 from partition_gen.parse_graph_compact_tokenizer import encode_topology_target
+from partition_gen.parse_graph_relations import divides_target, inserted_in_container
 from partition_gen.parse_graph_tokenizer import (
     ParseGraphTokenizerConfig,
     TokenReader,
@@ -79,12 +80,12 @@ def _relation_maps(topology_target: dict) -> dict:
                 contains_parent_by_child[str(child)] = str(parent)
         elif relation_type == "inserted_in":
             obj = relation.get("object")
-            container = relation.get("container")
+            container = inserted_in_container(relation)
             if obj is not None and container is not None:
                 inserted_container_by_object[str(obj)] = str(container)
         elif relation_type == "divides":
             divider = relation.get("divider")
-            target = relation.get("target")
+            target = divides_target(relation)
             if divider is not None and target is not None:
                 divides_target_by_divider[str(divider)] = str(target)
         elif relation_type == "adjacent_to":
