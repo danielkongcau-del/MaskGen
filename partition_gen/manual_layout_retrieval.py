@@ -145,6 +145,19 @@ def layout_rows_from_split_targets(topology_target: dict, geometry_targets: Sequ
     return rows
 
 
+def geometry_condition_target_from_topology_node(node: dict, *, frame: dict, source_node_id: str | None = None) -> dict:
+    node_id = str(source_node_id if source_node_id is not None else node.get("geometry_ref", node.get("id", "")))
+    return {
+        "format": "maskgen_generator_target_v1",
+        "target_type": "manual_parse_graph_geometry_v1",
+        "source_node_id": node_id,
+        "role": str(node.get("role", "")),
+        "label": int(node.get("label", 0)),
+        "geometry_model": str(node.get("geometry_model", "polygon_code")),
+        "frame": copy.deepcopy(frame),
+    }
+
+
 def load_split_row(row: dict, *, split_root: Path, manifest_parent: Path) -> tuple[Path, dict, list[dict]]:
     topology_path = _resolve_path(row["topology_path"], split_root=split_root, manifest_parent=manifest_parent)
     topology_target = load_json(topology_path)

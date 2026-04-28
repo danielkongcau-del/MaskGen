@@ -14,6 +14,7 @@ from partition_gen.manual_layout_retrieval import (
     attach_retrieved_layout_to_split_targets,
     build_layout_retrieval_fallbacks,
     build_layout_retrieval_library,
+    geometry_condition_target_from_topology_node,
     map_retrieved_layout_frames,
     retrieve_layout_entry,
 )
@@ -194,6 +195,29 @@ class ManualLayoutRetrievalTest(unittest.TestCase):
 
             self.assertAlmostEqual(decoded["frame"]["origin"][0], 128.0, delta=0.3)
             self.assertAlmostEqual(decoded["frame"]["origin"][1], 128.0, delta=0.3)
+
+    def test_generated_topology_node_can_condition_retrieved_frame_geometry(self) -> None:
+        query = _topology_target(stem="query", insert_label=1)
+        node = query["parse_graph"]["nodes"][0]
+        frame = {"origin": [64.0, 192.0], "scale": 32.0, "orientation": 0.0}
+        geometry = geometry_condition_target_from_topology_node(node, frame=frame, source_node_id=str(node["id"]))
+        config = ParseGraphTokenizerConfig()
+
+        conditioned_tokens = encode_oracle_frame_conditioned_geometry_target(
+            query,
+            geometry,
+            target_node_index=0,
+            config=config,
+        )
+        decoded = decode_geometry_tokens_to_target(
+            extract_geometry_tokens_from_oracle_frame_conditioned(conditioned_tokens),
+            config=config,
+            source_node_id=str(node["id"]),
+        )
+
+        self.assertEqual(geometry["source_node_id"], "query_support")
+        self.assertAlmostEqual(decoded["frame"]["origin"][0], 64.0, delta=0.3)
+        self.assertAlmostEqual(decoded["frame"]["origin"][1], 192.0, delta=0.3)
 
 
 if __name__ == "__main__":

@@ -262,6 +262,12 @@ Attaches generated local geometry to split topology using retrieved train-layout
 
 It first retrieves a nearest-neighbor train layout for each query topology, then uses those retrieved frames as the forced `FRAME` prefix for the oracle-frame geometry checkpoint. The geometry model samples only local `POLYS`/`ATOMS`, so this tests the proposed pipeline of generated topology, retrieved layout, and generated local shape without asking the geometry model to invent absolute frame placement.
 
+### `scripts/attach_retrieved_layout_oracle_frame_geometry_to_topology_samples.py`
+
+Attaches retrieved-layout frames and generated local geometry to generated topology samples.
+
+It decodes semantic-valid `MANUAL_TOPOLOGY_V1` sample rows, retrieves a nearest-neighbor train layout for each generated topology, uses the retrieved frames as oracle-frame geometry prefixes, and samples only the local shape suffix from the geometry checkpoint. This is the end-to-end diagnostic path for generated topology plus retrieval layout plus generated local geometry.
+
 ### `scripts/train_manual_relative_layout_ar.py`
 
 Trains the relative layout AR generator.
