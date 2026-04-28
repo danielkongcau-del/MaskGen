@@ -30,23 +30,20 @@ from partition_gen.parse_graph_tokenizer import ParseGraphTokenizerConfig  # noq
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train topology-conditioned manual layout/frame predictor.")
-    parser.add_argument("--train-split-root", type=Path, required=True)
-    parser.add_argument("--val-split-root", type=Path, required=True)
+    parser = argparse.ArgumentParser(description="Run a small-sample overfit diagnostic for manual layout/frame MLP.")
+    parser.add_argument("--split-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/manual_layout_frame"))
     parser.add_argument("--run-name", type=str, default=None)
-    parser.add_argument("--batch-size", type=int, default=2048)
-    parser.add_argument("--max-epochs", type=int, default=50)
+    parser.add_argument("--max-examples", type=int, default=256)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--max-epochs", type=int, default=500)
     parser.add_argument("--hidden-dim", type=int, default=256)
     parser.add_argument("--num-layers", type=int, default=3)
-    parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--learning-rate", type=float, default=3e-4)
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--eval-every", type=int, default=1)
-    parser.add_argument("--max-train-samples", type=int, default=None)
-    parser.add_argument("--max-val-samples", type=int, default=None)
-    parser.add_argument("--max-train-examples", type=int, default=None)
-    parser.add_argument("--max-val-examples", type=int, default=None)
+    parser.add_argument("--dropout", type=float, default=0.0)
+    parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=0.0)
+    parser.add_argument("--eval-every", type=int, default=25)
+    parser.add_argument("--target-origin-mae", type=float, default=2.0)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
@@ -72,31 +69,40 @@ def make_loader(dataset: ManualLayoutFrameDataset, *, batch_size: int, shuffle: 
     )
 
 
+def write_summary_md(path: Path, payload: dict) -> None:
+    lines = [
+        "# Manual Layout Frame Overfit Diagnostic",
+        "",
+        f"- examples: {payload.get('example_count')}",
+        f"- epoch: {payload.get('epoch')}",
+        f"- train loss: {payload.get('train_loss')}",
+        f"- origin MAE: {payload.get('origin_mae')}",
+        f"- scale MAE: {payload.get('scale_mae')}",
+        f"- orientation MAE: {payload.get('orientation_mae')}",
+        f"- reached target: {payload.get('reached_target')}",
+        "",
+        "| head | accuracy | prediction unique |",
+        "| --- | ---: | ---: |",
+    ]
+    for head, accuracy in (payload.get("head_accuracy", {}) or {}).items():
+        hist = (payload.get("head_histograms", {}) or {}).get(head, {})
+        lines.append(f"| {head} | {accuracy} | {hist.get('prediction_unique_count')} |")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def main() -> None:
     args = parse_args()
     set_seed(int(args.seed))
-    run_name = args.run_name or time.strftime("run_%Y%m%d_%H%M%S")
+    run_name = args.run_name or time.strftime("overfit_%Y%m%d_%H%M%S")
     output_dir = args.output_dir / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
     tokenizer_config = ParseGraphTokenizerConfig()
-
-    train_dataset = ManualLayoutFrameDataset(
-        args.train_split_root,
-        config=tokenizer_config,
-        max_samples=args.max_train_samples,
-        max_examples=args.max_train_examples,
-    )
-    val_dataset = ManualLayoutFrameDataset(
-        args.val_split_root,
-        config=tokenizer_config,
-        max_samples=args.max_val_samples,
-        max_examples=args.max_val_examples,
-    )
-    train_loader = make_loader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
-    val_loader = make_loader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
-
+    dataset = ManualLayoutFrameDataset(args.split_root, config=tokenizer_config, max_examples=args.max_examples)
+    train_loader = make_loader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+    eval_loader = make_loader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
     model_config = ManualLayoutFrameMLPConfig(
-        numeric_dim=int(train_dataset.numeric_dim),
+        numeric_dim=int(dataset.numeric_dim),
         hidden_dim=int(args.hidden_dim),
         num_layers=int(args.num_layers),
         dropout=float(args.dropout),
@@ -108,13 +114,7 @@ def main() -> None:
     model = ManualLayoutFrameMLP(model_config).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(args.learning_rate), weight_decay=float(args.weight_decay))
     train_config = {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()}
-    train_config.update(
-        {
-            "resolved_output_dir": str(output_dir.as_posix()),
-            "train_example_count": int(len(train_dataset)),
-            "val_example_count": int(len(val_dataset)),
-        }
-    )
+    train_config.update({"resolved_output_dir": str(output_dir.as_posix()), "example_count": int(len(dataset))})
     save_json(
         output_dir / "config.json",
         {
@@ -124,7 +124,9 @@ def main() -> None:
         },
     )
 
-    best_metric = float("inf")
+    best_origin_mae = float("inf")
+    final_payload: dict = {}
+    reached_target = False
     for epoch in range(1, int(args.max_epochs) + 1):
         model.train()
         losses: list[float] = []
@@ -137,16 +139,17 @@ def main() -> None:
             optimizer.step()
             losses.append(float(loss.item()))
         train_loss = float(sum(losses) / len(losses)) if losses else float("nan")
-        log_row = {"epoch": int(epoch), "train_loss": train_loss}
         if epoch % int(args.eval_every) == 0 or epoch == int(args.max_epochs):
-            metrics = evaluate_layout_frame_model(model, val_loader, device=device, config=tokenizer_config)
-            for key, value in metrics.items():
-                if isinstance(value, (int, float)) or value is None:
-                    log_row[f"val_{key}"] = value
-                elif key == "head_accuracy":
-                    for head, accuracy in value.items():
-                        log_row[f"val_{head}_accuracy"] = accuracy
-            current_metric = float(metrics.get("origin_mae") or float("inf"))
+            metrics = evaluate_layout_frame_model(model, eval_loader, device=device, config=tokenizer_config)
+            origin_mae = float(metrics.get("origin_mae") or float("inf"))
+            final_payload = {
+                "format": "maskgen_manual_layout_frame_overfit_eval_v1",
+                "epoch": int(epoch),
+                "train_loss": train_loss,
+                "example_count": int(len(dataset)),
+                "reached_target": bool(origin_mae <= float(args.target_origin_mae)),
+                **metrics,
+            }
             save_layout_frame_checkpoint(
                 output_dir / "ckpt_last.pt",
                 model=model,
@@ -157,8 +160,8 @@ def main() -> None:
                 metrics=metrics,
                 epoch=epoch,
             )
-            if current_metric < best_metric:
-                best_metric = current_metric
+            if origin_mae < best_origin_mae:
+                best_origin_mae = origin_mae
                 save_layout_frame_checkpoint(
                     output_dir / "ckpt_best.pt",
                     model=model,
@@ -169,10 +172,28 @@ def main() -> None:
                     metrics=metrics,
                     epoch=epoch,
                 )
-            save_json(output_dir / "eval_last.json", {"epoch": epoch, **metrics})
-        append_jsonl(output_dir / "eval_log.jsonl", log_row)
+            append_jsonl(
+                output_dir / "eval_log.jsonl",
+                {
+                    "epoch": int(epoch),
+                    "train_loss": train_loss,
+                    "origin_mae": metrics.get("origin_mae"),
+                    "scale_mae": metrics.get("scale_mae"),
+                    "orientation_mae": metrics.get("orientation_mae"),
+                    **{f"{head}_accuracy": value for head, value in (metrics.get("head_accuracy", {}) or {}).items()},
+                },
+            )
+            if origin_mae <= float(args.target_origin_mae):
+                reached_target = True
+                break
 
-    print(f"training complete epochs={args.max_epochs} best_origin_mae={best_metric:.4f} output={output_dir}")
+    final_payload["reached_target"] = bool(reached_target or final_payload.get("reached_target", False))
+    (output_dir / "eval_last.json").write_text(json.dumps(final_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    write_summary_md(output_dir / "eval_last.md", final_payload)
+    print(
+        f"overfit layout frames examples={len(dataset)} origin_mae={final_payload.get('origin_mae'):.4f} "
+        f"reached_target={final_payload.get('reached_target')} output={output_dir}"
+    )
 
 
 if __name__ == "__main__":

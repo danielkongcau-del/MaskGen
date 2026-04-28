@@ -36,6 +36,7 @@ ROLE_TO_ID = {
 ID_TO_ROLE = {value: key for key, value in ROLE_TO_ID.items()}
 GEOMETRY_MODEL_TO_ID = {"none": 0, "polygon_code": 1, "convex_atoms": 2, "unknown": 3}
 ID_TO_GEOMETRY_MODEL = {value: key for key, value in GEOMETRY_MODEL_TO_ID.items()}
+FRAME_HEADS = ("origin_x", "origin_y", "scale", "orientation")
 
 
 def _resolve_path(value: object, *, split_root: Path, manifest_parent: Path) -> Path:
@@ -236,6 +237,36 @@ def bins_to_frame(bins: dict, *, config: ParseGraphTokenizerConfig) -> dict:
     }
 
 
+def _frame_from_row(row: dict, *, config: ParseGraphTokenizerConfig) -> dict:
+    if "target_bins" in row:
+        return bins_to_frame(row["target_bins"], config=config)
+    return copy.deepcopy(row.get("target_frame", {"origin": [0.0, 0.0], "scale": 1.0, "orientation": 0.0}))
+
+
+def _frame_value(frame: dict, head: str) -> float:
+    if head == "origin_x":
+        return float((frame.get("origin", [0.0, 0.0]) or [0.0, 0.0])[0])
+    if head == "origin_y":
+        return float((frame.get("origin", [0.0, 0.0]) or [0.0, 0.0])[1])
+    return float(frame.get(head, 0.0))
+
+
+def _mean_frame(frames: Sequence[dict]) -> dict:
+    if not frames:
+        return {"origin": [0.0, 0.0], "scale": 1.0, "orientation": 0.0}
+    sin_sum = sum(math.sin(float(frame.get("orientation", 0.0))) for frame in frames)
+    cos_sum = sum(math.cos(float(frame.get("orientation", 0.0))) for frame in frames)
+    orientation = math.atan2(sin_sum, cos_sum) if sin_sum or cos_sum else 0.0
+    return {
+        "origin": [
+            float(mean([_frame_value(frame, "origin_x") for frame in frames])),
+            float(mean([_frame_value(frame, "origin_y") for frame in frames])),
+        ],
+        "scale": float(mean([_frame_value(frame, "scale") for frame in frames])),
+        "orientation": float(orientation),
+    }
+
+
 def build_layout_frame_example(
     topology_target: dict,
     *,
@@ -312,12 +343,15 @@ class ManualLayoutFrameDataset(Dataset):
         *,
         config: ParseGraphTokenizerConfig | None = None,
         max_samples: int | None = None,
+        max_examples: int | None = None,
     ) -> None:
         self.split_root = Path(split_root)
         self.config = config or ParseGraphTokenizerConfig()
         self.rows = list(
             iter_layout_frame_examples_from_split(self.split_root, config=self.config, max_samples=max_samples)
         )
+        if max_examples is not None:
+            self.rows = self.rows[: int(max_examples)]
         if not self.rows:
             raise RuntimeError(f"No layout frame examples found in {self.split_root}")
         self.numeric_dim = len(self.rows[0]["numeric"])
@@ -442,6 +476,42 @@ def _angle_abs_error(left: float, right: float) -> float:
     return float(min(diff, 2.0 * math.pi - diff))
 
 
+def _bin_value(head: str, bin_index: int, *, config: ParseGraphTokenizerConfig) -> float:
+    if head in ("origin_x", "origin_y"):
+        return dequantize(int(bin_index), low=config.position_min, high=config.position_max, bins=config.position_bins)
+    if head == "scale":
+        return dequantize(int(bin_index), low=config.scale_min, high=config.scale_max, bins=config.scale_bins)
+    if head == "orientation":
+        return dequantize(int(bin_index), low=config.angle_min, high=config.angle_max, bins=config.angle_bins)
+    return float(bin_index)
+
+
+def _counter_to_json(counter: Counter) -> dict:
+    return {str(key): int(counter[key]) for key in sorted(counter)}
+
+
+def _top_bins(counter: Counter, *, total: int, head: str, config: ParseGraphTokenizerConfig, limit: int = 12) -> list[dict]:
+    rows = []
+    for bin_index, count in counter.most_common(int(limit)):
+        rows.append(
+            {
+                "bin": int(bin_index),
+                "count": int(count),
+                "fraction": float(count / total) if total else 0.0,
+                "value": float(_bin_value(head, int(bin_index), config=config)),
+            }
+        )
+    return rows
+
+
+def _frame_error_row(pred_frame: dict, target_frame: dict) -> dict:
+    return {
+        "origin_mae": float(math.dist(pred_frame["origin"], target_frame["origin"])),
+        "scale_mae": float(abs(float(pred_frame["scale"]) - float(target_frame["scale"]))),
+        "orientation_mae": float(_angle_abs_error(float(pred_frame["orientation"]), float(target_frame["orientation"]))),
+    }
+
+
 @torch.no_grad()
 def evaluate_layout_frame_model(
     model: ManualLayoutFrameMLP,
@@ -457,6 +527,8 @@ def evaluate_layout_frame_model(
     errors = defaultdict(list)
     role_errors = defaultdict(lambda: defaultdict(list))
     role_counts = Counter()
+    target_histograms = defaultdict(Counter)
+    prediction_histograms = defaultdict(Counter)
 
     for batch in loader:
         moved = move_layout_batch_to_device(batch, device)
@@ -468,19 +540,14 @@ def evaluate_layout_frame_model(
         for name in predictions:
             counts[name] += int(predictions[name].numel())
             correct[name] += int((predictions[name] == targets[name]).sum().item())
+            prediction_histograms[name].update(int(value) for value in predictions[name].tolist())
+            target_histograms[name].update(int(value) for value in targets[name].tolist())
         for row_index, metadata in enumerate(batch["metadata"]):
             role = str(metadata.get("role", "unknown"))
             role_counts[role] += 1
             pred_frame = bins_to_frame({name: int(predictions[name][row_index]) for name in predictions}, config=config)
             target_frame = bins_to_frame({name: int(targets[name][row_index]) for name in targets}, config=config)
-            origin_error = math.dist(pred_frame["origin"], target_frame["origin"])
-            scale_error = abs(float(pred_frame["scale"]) - float(target_frame["scale"]))
-            orientation_error = _angle_abs_error(float(pred_frame["orientation"]), float(target_frame["orientation"]))
-            for key, value in (
-                ("origin_mae", origin_error),
-                ("scale_mae", scale_error),
-                ("orientation_mae", orientation_error),
-            ):
+            for key, value in _frame_error_row(pred_frame, target_frame).items():
                 errors[key].append(float(value))
                 role_errors[role][key].append(float(value))
 
@@ -495,6 +562,17 @@ def evaluate_layout_frame_model(
         "origin_mae": avg(errors["origin_mae"]),
         "scale_mae": avg(errors["scale_mae"]),
         "orientation_mae": avg(errors["orientation_mae"]),
+        "head_histograms": {
+            name: {
+                "target": _counter_to_json(target_histograms[name]),
+                "prediction": _counter_to_json(prediction_histograms[name]),
+                "target_unique_count": int(len(target_histograms[name])),
+                "prediction_unique_count": int(len(prediction_histograms[name])),
+                "target_top_bins": _top_bins(target_histograms[name], total=counts[name], head=name, config=config),
+                "prediction_top_bins": _top_bins(prediction_histograms[name], total=counts[name], head=name, config=config),
+            }
+            for name in FRAME_HEADS
+        },
         "role_metrics": {
             role: {
                 "count": int(role_counts[role]),
@@ -503,6 +581,118 @@ def evaluate_layout_frame_model(
                 "orientation_mae": avg(values["orientation_mae"]),
             }
             for role, values in sorted(role_errors.items())
+        },
+    }
+
+
+def _role_label_key(row: dict) -> str:
+    return f"{row.get('role', 'unknown')}|{int(row.get('label', 0))}"
+
+
+def build_role_label_mean_frame_baseline(
+    rows: Sequence[dict],
+    *,
+    config: ParseGraphTokenizerConfig,
+) -> dict:
+    role_label_frames = defaultdict(list)
+    role_frames = defaultdict(list)
+    global_frames: list[dict] = []
+    for row in rows:
+        frame = _frame_from_row(row, config=config)
+        role_label_frames[_role_label_key(row)].append(frame)
+        role_frames[str(row.get("role", "unknown"))].append(frame)
+        global_frames.append(frame)
+    return {
+        "role_label_frames": {key: _mean_frame(frames) for key, frames in sorted(role_label_frames.items())},
+        "role_frames": {key: _mean_frame(frames) for key, frames in sorted(role_frames.items())},
+        "global_frame": _mean_frame(global_frames),
+        "role_label_counts": {key: len(frames) for key, frames in sorted(role_label_frames.items())},
+        "role_counts": {key: len(frames) for key, frames in sorted(role_frames.items())},
+        "global_count": int(len(global_frames)),
+    }
+
+
+def _predict_role_label_mean_frame(row: dict, baseline: dict) -> tuple[dict, str]:
+    role_label_key = _role_label_key(row)
+    if role_label_key in baseline["role_label_frames"]:
+        return copy.deepcopy(baseline["role_label_frames"][role_label_key]), "role_label"
+    role = str(row.get("role", "unknown"))
+    if role in baseline["role_frames"]:
+        return copy.deepcopy(baseline["role_frames"][role]), "role"
+    return copy.deepcopy(baseline["global_frame"]), "global"
+
+
+def evaluate_role_label_frame_baseline(
+    train_rows: Sequence[dict],
+    eval_rows: Sequence[dict],
+    *,
+    config: ParseGraphTokenizerConfig,
+) -> dict:
+    baseline = build_role_label_mean_frame_baseline(train_rows, config=config)
+    counts = Counter()
+    correct = Counter()
+    errors = defaultdict(list)
+    role_errors = defaultdict(lambda: defaultdict(list))
+    role_counts = Counter()
+    mode_counts = Counter()
+    target_histograms = defaultdict(Counter)
+    prediction_histograms = defaultdict(Counter)
+
+    for row in eval_rows:
+        pred_frame, mode = _predict_role_label_mean_frame(row, baseline)
+        target_frame = _frame_from_row(row, config=config)
+        pred_bins = frame_to_bins(pred_frame, config=config)
+        target_bins = frame_to_bins(target_frame, config=config)
+        mode_counts[mode] += 1
+        role = str(row.get("role", "unknown"))
+        role_counts[role] += 1
+        for name in FRAME_HEADS:
+            counts[name] += 1
+            correct[name] += int(int(pred_bins[name]) == int(target_bins[name]))
+            prediction_histograms[name][int(pred_bins[name])] += 1
+            target_histograms[name][int(target_bins[name])] += 1
+        for key, value in _frame_error_row(bins_to_frame(pred_bins, config=config), target_frame).items():
+            errors[key].append(float(value))
+            role_errors[role][key].append(float(value))
+
+    def avg(values: Sequence[float]) -> float | None:
+        return float(mean(values)) if values else None
+
+    return {
+        "format": "maskgen_manual_layout_frame_role_label_mean_baseline_v1",
+        "train_example_count": int(len(train_rows)),
+        "example_count": int(len(eval_rows)),
+        "fallback_counts": {key: int(value) for key, value in sorted(mode_counts.items())},
+        "head_accuracy": {
+            name: float(correct[name] / counts[name]) if counts[name] else 0.0 for name in FRAME_HEADS
+        },
+        "origin_mae": avg(errors["origin_mae"]),
+        "scale_mae": avg(errors["scale_mae"]),
+        "orientation_mae": avg(errors["orientation_mae"]),
+        "head_histograms": {
+            name: {
+                "target": _counter_to_json(target_histograms[name]),
+                "prediction": _counter_to_json(prediction_histograms[name]),
+                "target_unique_count": int(len(target_histograms[name])),
+                "prediction_unique_count": int(len(prediction_histograms[name])),
+                "target_top_bins": _top_bins(target_histograms[name], total=counts[name], head=name, config=config),
+                "prediction_top_bins": _top_bins(prediction_histograms[name], total=counts[name], head=name, config=config),
+            }
+            for name in FRAME_HEADS
+        },
+        "role_metrics": {
+            role: {
+                "count": int(role_counts[role]),
+                "origin_mae": avg(values["origin_mae"]),
+                "scale_mae": avg(values["scale_mae"]),
+                "orientation_mae": avg(values["orientation_mae"]),
+            }
+            for role, values in sorted(role_errors.items())
+        },
+        "baseline_counts": {
+            "role_label_key_count": int(len(baseline["role_label_frames"])),
+            "role_key_count": int(len(baseline["role_frames"])),
+            "global_count": int(baseline["global_count"]),
         },
     }
 

@@ -212,7 +212,13 @@ It reads topology/geometry split targets, builds one supervised example per rend
 
 Evaluates a layout/frame predictor checkpoint on a split target root.
 
-It reports CE loss, per-head bin accuracy, origin/scale/orientation MAE, and role-wise MAE metrics for diagnosing whether layout prediction is improving before local shape generation is reintroduced.
+It reports CE loss, per-head bin accuracy, prediction/target bin histograms, origin/scale/orientation MAE, and role-wise MAE metrics for diagnosing whether layout prediction is improving before local shape generation is reintroduced. Pass `--baseline-train-split-root` to include a `(role, label)` mean-frame baseline in the same output.
+
+### `scripts/overfit_manual_layout_frame.py`
+
+Runs a small-sample overfit diagnostic for the layout/frame MLP.
+
+It trains and evaluates on the same first `--max-examples` examples from a split root. This is intended to catch broken labels, loss wiring, or dequantization before interpreting full validation performance. A healthy model should drive train-set origin MAE down on a small subset.
 
 ### `scripts/attach_layout_frame_to_split_targets.py`
 

@@ -16,6 +16,8 @@ from partition_gen.manual_layout_frame import (
     bins_to_frame,
     build_layout_frame_example,
     collate_layout_frame_examples,
+    evaluate_layout_frame_model,
+    evaluate_role_label_frame_baseline,
     frame_to_bins,
     layout_frame_loss,
 )
@@ -171,6 +173,54 @@ class ManualLayoutFrameTest(unittest.TestCase):
 
             self.assertEqual(logits["origin_x"].shape, (2, 1024))
             self.assertTrue(float(loss.item()) > 0.0)
+
+    def test_evaluate_reports_histograms(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            split_root = _write_split(tmpdir)
+            dataset = ManualLayoutFrameDataset(split_root)
+            model = ManualLayoutFrameMLP(
+                ManualLayoutFrameMLPConfig(
+                    numeric_dim=dataset.numeric_dim,
+                    hidden_dim=32,
+                    num_layers=1,
+                    position_bins=1024,
+                    scale_bins=1024,
+                    angle_bins=1024,
+                )
+            )
+            loader = torch.utils.data.DataLoader(
+                dataset,
+                batch_size=2,
+                shuffle=False,
+                collate_fn=collate_layout_frame_examples,
+            )
+
+            metrics = evaluate_layout_frame_model(
+                model,
+                loader,
+                device=torch.device("cpu"),
+                config=ParseGraphTokenizerConfig(),
+            )
+
+            self.assertIn("head_histograms", metrics)
+            self.assertEqual(metrics["head_histograms"]["origin_x"]["target_unique_count"], 3)
+            self.assertGreaterEqual(metrics["head_histograms"]["origin_x"]["prediction_unique_count"], 1)
+
+    def test_role_label_mean_baseline_memorizes_same_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            split_root = _write_split(tmpdir)
+            dataset = ManualLayoutFrameDataset(split_root)
+
+            metrics = evaluate_role_label_frame_baseline(
+                dataset.rows,
+                dataset.rows,
+                config=ParseGraphTokenizerConfig(),
+            )
+
+            self.assertEqual(metrics["example_count"], len(dataset))
+            self.assertEqual(metrics["fallback_counts"], {"role_label": len(dataset)})
+            self.assertAlmostEqual(metrics["origin_mae"], 0.0, delta=1e-6)
+            self.assertEqual(metrics["head_accuracy"]["origin_x"], 1.0)
 
     def test_attach_predicted_frame_preserves_local_shape(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
