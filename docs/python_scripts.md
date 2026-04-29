@@ -280,6 +280,8 @@ Evaluates a retrieved-layout residual checkpoint.
 
 The report compares raw retrieval baseline MAE against residual-corrected MAE for origin, scale, and orientation, with mapping-mode and retrieval-score diagnostics. This is the main check for whether the "retrieve a real layout, then adjust it" path is actually improving layout quality.
 
+Residual-decoded scale is clamped to the tokenizer's legal scale range during evaluation and attach. The report includes `scale_out_of_range_count`, raw/clamped scale stats, and raw/clamped bbox-huge counts so scale explosions are visible instead of being hidden by high visible-polygon rates.
+
 ### `scripts/attach_retrieved_residual_layout_to_split_targets.py`
 
 Attaches residual-corrected retrieved layouts to split targets using true local shapes.

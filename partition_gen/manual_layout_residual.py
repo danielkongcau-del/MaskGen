@@ -56,6 +56,14 @@ def _safe_scale(value: object) -> float:
     return max(1e-6, float(value))
 
 
+def _scale_bounds(config: ParseGraphTokenizerConfig) -> tuple[float, float]:
+    return max(1.0, float(config.scale_min)), float(config.scale_max)
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return float(max(float(low), min(float(high), float(value))))
+
+
 def _numeric_stats(values: Sequence[float]) -> dict:
     if not values:
         return {"count": 0, "mean": None, "min": None, "median": None, "max": None}
@@ -88,6 +96,13 @@ def frame_residual_target(
     ]
 
 
+def residual_values_to_raw_scale(residual_values: Sequence[float] | torch.Tensor, retrieved_frame: dict) -> float:
+    if isinstance(residual_values, torch.Tensor):
+        residual_values = residual_values.detach().cpu().tolist()
+    delta_log_scale = max(-6.0, min(6.0, float(residual_values[2])))
+    return float(_safe_scale(retrieved_frame.get("scale", 1.0)) * math.exp(delta_log_scale))
+
+
 def residual_values_to_frame(
     residual_values: Sequence[float] | torch.Tensor,
     retrieved_frame: dict,
@@ -100,16 +115,59 @@ def residual_values_to_frame(
     retrieved_x, retrieved_y = _frame_origin(retrieved_frame)
     delta_x = max(-2.0, min(2.0, float(residual_values[0]))) * float(config.position_max)
     delta_y = max(-2.0, min(2.0, float(residual_values[1]))) * float(config.position_max)
-    delta_log_scale = max(-6.0, min(6.0, float(residual_values[2])))
+    scale_min, scale_max = _scale_bounds(config)
+    raw_scale = residual_values_to_raw_scale(residual_values, retrieved_frame)
     delta_orientation = max(-2.0, min(2.0, float(residual_values[3]))) * math.pi
     return {
         "origin": [
             float(retrieved_x + delta_x),
             float(retrieved_y + delta_y),
         ],
-        "scale": float(_safe_scale(retrieved_frame.get("scale", 1.0)) * math.exp(delta_log_scale)),
+        "scale": _clamp(raw_scale, scale_min, scale_max),
         "orientation": _wrap_angle(float(retrieved_frame.get("orientation", 0.0)) + delta_orientation),
     }
+
+
+def geometry_local_bbox(geometry_target: dict) -> dict:
+    points: list[tuple[float, float]] = []
+
+    def add_points(values: object) -> None:
+        for point in values or []:
+            if isinstance(point, (list, tuple)) and len(point) >= 2:
+                points.append((float(point[0]), float(point[1])))
+
+    geometry = geometry_target.get("geometry", {}) or {}
+    add_points(geometry.get("outer_local", []))
+    for hole in geometry.get("holes_local", []) or []:
+        add_points(hole)
+    for polygon in geometry.get("polygons_local", []) or []:
+        add_points((polygon or {}).get("outer_local", []))
+        for hole in (polygon or {}).get("holes_local", []) or []:
+            add_points(hole)
+    for atom in geometry_target.get("atoms", []) or []:
+        add_points((atom or {}).get("outer_local", []))
+    if not points:
+        return {"min_x": -0.5, "min_y": -0.5, "max_x": 0.5, "max_y": 0.5, "width": 1.0, "height": 1.0}
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    width = float(max(xs) - min(xs))
+    height = float(max(ys) - min(ys))
+    return {
+        "min_x": float(min(xs)),
+        "min_y": float(min(ys)),
+        "max_x": float(max(xs)),
+        "max_y": float(max(ys)),
+        "width": width,
+        "height": height,
+    }
+
+
+def scaled_bbox_metrics(local_bbox: dict | None, scale: float) -> dict:
+    if not local_bbox:
+        local_bbox = {"width": 1.0, "height": 1.0}
+    width = abs(float(local_bbox.get("width", 1.0))) * float(scale)
+    height = abs(float(local_bbox.get("height", 1.0))) * float(scale)
+    return {"width": float(width), "height": float(height), "area": float(width * height)}
 
 
 def retrieved_frame_features(
@@ -137,6 +195,7 @@ def build_layout_residual_example(
     node_index: int,
     retrieved_frame: dict,
     target_frame: dict | None = None,
+    local_bbox: dict | None = None,
     retrieval_score: float = 0.0,
     mapping_mode: str = "unknown",
     config: ParseGraphTokenizerConfig | None = None,
@@ -156,6 +215,7 @@ def build_layout_residual_example(
         "retrieval_score_value": [min(1.0, max(0.0, float(retrieval_score) / 512.0))],
         "retrieved_frame": copy.deepcopy(retrieved_frame),
         "retrieved_frame_values": retrieved_frame_features(retrieved_frame, config=config),
+        "local_bbox": copy.deepcopy(local_bbox) if local_bbox is not None else None,
     }
     if target_frame is not None:
         example["target_frame"] = copy.deepcopy(target_frame)
@@ -199,11 +259,17 @@ def iter_layout_residual_examples_from_split(
             int(key): str(value)
             for key, value in (mapping_diagnostics.get("node_mapping_modes", {}) or {}).items()
         }
+        geometry_by_source_id = {
+            str(target.get("source_node_id")): target
+            for target in geometry_targets
+            if target.get("source_node_id") is not None
+        }
         for layout_row in layout_rows_from_split_targets(topology_target, geometry_targets):
             node_index = int(layout_row["node_index"])
             retrieved_frame = frame_by_index.get(node_index)
             if retrieved_frame is None:
                 continue
+            geometry_target = geometry_by_source_id.get(str(layout_row.get("geometry_ref")))
             yield {
                 "source_topology": str(topology_path.as_posix()),
                 "source_node_id": str(layout_row.get("node_id", "")),
@@ -215,6 +281,7 @@ def iter_layout_residual_examples_from_split(
                     node_index=node_index,
                     retrieved_frame=retrieved_frame,
                     target_frame=layout_row["frame"],
+                    local_bbox=geometry_local_bbox(geometry_target) if geometry_target is not None else None,
                     retrieval_score=float(retrieval_score),
                     mapping_mode=node_mapping_modes.get(node_index, "unknown"),
                     config=config,
@@ -283,6 +350,7 @@ class ManualLayoutResidualDataset(Dataset):
                     "retrieved_library_index",
                     "retrieved_frame",
                     "target_frame",
+                    "local_bbox",
                 )
             },
         }
@@ -430,6 +498,21 @@ def evaluate_layout_residual_regressor(
     mapping_modes = Counter()
     retrieval_scores: list[float] = []
     role_counts = Counter()
+    raw_scales: list[float] = []
+    predicted_scales: list[float] = []
+    raw_bbox_widths: list[float] = []
+    raw_bbox_heights: list[float] = []
+    raw_bbox_areas: list[float] = []
+    bbox_widths: list[float] = []
+    bbox_heights: list[float] = []
+    bbox_areas: list[float] = []
+    scale_min, scale_max = _scale_bounds(config)
+    scale_below_min = 0
+    scale_above_max = 0
+    bbox_huge_count = 0
+    raw_bbox_huge_count = 0
+    huge_side_threshold = float(config.position_max) * 2.0
+    huge_area_threshold = float(config.position_max) * float(config.position_max) * 4.0
 
     for batch in loader:
         moved = move_layout_residual_batch_to_device(batch, device)
@@ -443,7 +526,31 @@ def evaluate_layout_residual_regressor(
             retrieval_scores.append(float(metadata.get("retrieval_score", 0.0)))
             retrieved_frame = metadata["retrieved_frame"]
             target_frame = metadata["target_frame"]
+            local_bbox = metadata.get("local_bbox")
+            raw_scale = residual_values_to_raw_scale(predictions[row_index], retrieved_frame)
             pred_frame = residual_values_to_frame(predictions[row_index], retrieved_frame, config=config)
+            raw_bbox = scaled_bbox_metrics(local_bbox, raw_scale)
+            pred_bbox = scaled_bbox_metrics(local_bbox, float(pred_frame.get("scale", 1.0)))
+            raw_scales.append(float(raw_scale))
+            predicted_scales.append(float(pred_frame.get("scale", 1.0)))
+            raw_bbox_widths.append(float(raw_bbox["width"]))
+            raw_bbox_heights.append(float(raw_bbox["height"]))
+            raw_bbox_areas.append(float(raw_bbox["area"]))
+            bbox_widths.append(float(pred_bbox["width"]))
+            bbox_heights.append(float(pred_bbox["height"]))
+            bbox_areas.append(float(pred_bbox["area"]))
+            scale_below_min += int(raw_scale < scale_min)
+            scale_above_max += int(raw_scale > scale_max)
+            raw_bbox_huge_count += int(
+                raw_bbox["width"] > huge_side_threshold
+                or raw_bbox["height"] > huge_side_threshold
+                or raw_bbox["area"] > huge_area_threshold
+            )
+            bbox_huge_count += int(
+                pred_bbox["width"] > huge_side_threshold
+                or pred_bbox["height"] > huge_side_threshold
+                or pred_bbox["area"] > huge_area_threshold
+            )
             for key, value in _frame_error_row(pred_frame, target_frame).items():
                 residual_errors[key].append(float(value))
                 role_errors[role][f"residual_{key}"].append(float(value))
@@ -471,6 +578,26 @@ def evaluate_layout_residual_regressor(
         else float((baseline_origin - residual_origin) / baseline_origin),
         "mapping_mode_histogram": {key: int(value) for key, value in sorted(mapping_modes.items())},
         "retrieval_score_stats": _numeric_stats(retrieval_scores),
+        "scale_min": float(scale_min),
+        "scale_max": float(scale_max),
+        "raw_predicted_scale_stats": _numeric_stats(raw_scales),
+        "predicted_scale_stats": _numeric_stats(predicted_scales),
+        "scale_below_min_count": int(scale_below_min),
+        "scale_above_max_count": int(scale_above_max),
+        "scale_out_of_range_count": int(scale_below_min + scale_above_max),
+        "scale_clamped_count": int(scale_below_min + scale_above_max),
+        "raw_bbox_width_stats": _numeric_stats(raw_bbox_widths),
+        "raw_bbox_height_stats": _numeric_stats(raw_bbox_heights),
+        "raw_bbox_area_stats": _numeric_stats(raw_bbox_areas),
+        "bbox_width_stats": _numeric_stats(bbox_widths),
+        "bbox_height_stats": _numeric_stats(bbox_heights),
+        "bbox_area_stats": _numeric_stats(bbox_areas),
+        "raw_bbox_huge_count": int(raw_bbox_huge_count),
+        "bbox_huge_count": int(bbox_huge_count),
+        "bbox_huge_threshold": {
+            "side": float(huge_side_threshold),
+            "area": float(huge_area_threshold),
+        },
         "role_metrics": {
             role: {
                 "count": int(role_counts[role]),

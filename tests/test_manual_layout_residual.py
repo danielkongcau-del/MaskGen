@@ -17,6 +17,7 @@ from partition_gen.manual_layout_residual import (
     evaluate_layout_residual_regressor,
     frame_residual_target,
     layout_residual_loss,
+    residual_values_to_raw_scale,
     residual_values_to_frame,
 )
 from partition_gen.manual_layout_retrieval import (
@@ -120,6 +121,17 @@ class ManualLayoutResidualTest(unittest.TestCase):
         self.assertAlmostEqual(decoded["scale"], 32.0, delta=1e-6)
         self.assertAlmostEqual(decoded["orientation"], -0.5, delta=1e-6)
 
+    def test_residual_frame_clamps_scale_to_tokenizer_range(self) -> None:
+        config = ParseGraphTokenizerConfig()
+        retrieved = {"origin": [64.0, 96.0], "scale": 256.0, "orientation": 0.0}
+        residual = [0.0, 0.0, 6.0, 0.0]
+
+        raw_scale = residual_values_to_raw_scale(residual, retrieved)
+        decoded = residual_values_to_frame(residual, retrieved, config=config)
+
+        self.assertGreater(raw_scale, config.scale_max)
+        self.assertEqual(decoded["scale"], config.scale_max)
+
     def test_dataset_builds_retrieval_residual_examples(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             train = Path(tmpdir) / "split" / "train"
@@ -148,6 +160,7 @@ class ManualLayoutResidualTest(unittest.TestCase):
 
             self.assertEqual(len(dataset), 2)
             self.assertEqual(row["mapping_mode"], "retrieved_exact_order")
+            self.assertEqual(row["local_bbox"]["width"], 1.0)
             self.assertAlmostEqual(decoded["origin"][0], row["target_frame"]["origin"][0], delta=1e-6)
             self.assertAlmostEqual(decoded["origin"][1], row["target_frame"]["origin"][1], delta=1e-6)
 
@@ -207,6 +220,8 @@ class ManualLayoutResidualTest(unittest.TestCase):
             self.assertEqual(predictions.shape, (2, 4))
             self.assertTrue(float(loss.item()) >= 0.0)
             self.assertIn("baseline_origin_mae", metrics)
+            self.assertIn("scale_out_of_range_count", metrics)
+            self.assertIn("bbox_huge_count", metrics)
             self.assertEqual(targets[0]["metadata"]["attached_geometry_count"], 2)
             self.assertEqual(nodes_by_id["val_a_support"]["frame"]["origin"], [128.0, 128.0])
             self.assertEqual(nodes_by_id["val_a_insert"]["geometry"]["outer_local"][0], [-0.5, -0.5])
