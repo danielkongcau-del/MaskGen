@@ -268,6 +268,24 @@ Attaches retrieved-layout frames and generated local geometry to generated topol
 
 It decodes semantic-valid `MANUAL_TOPOLOGY_V1` sample rows, retrieves a nearest-neighbor train layout for each generated topology, uses the retrieved frames as oracle-frame geometry prefixes, and samples only the local shape suffix from the geometry checkpoint. This is the end-to-end diagnostic path for generated topology plus retrieval layout plus generated local geometry.
 
+### `scripts/train_manual_layout_residual.py`
+
+Trains a residual frame predictor on top of nearest-neighbor retrieved layouts.
+
+It builds one supervised example per renderable geometry node: retrieve a similar train layout, map its frame to the query node, then learn normalized `(dx, dy, dlog_scale, dtheta)` from the retrieved frame to the true frame. By default training excludes same-stem retrieval so the model learns to correct a neighbor layout instead of memorizing the source row.
+
+### `scripts/evaluate_manual_layout_residual.py`
+
+Evaluates a retrieved-layout residual checkpoint.
+
+The report compares raw retrieval baseline MAE against residual-corrected MAE for origin, scale, and orientation, with mapping-mode and retrieval-score diagnostics. This is the main check for whether the "retrieve a real layout, then adjust it" path is actually improving layout quality.
+
+### `scripts/attach_retrieved_residual_layout_to_split_targets.py`
+
+Attaches residual-corrected retrieved layouts to split targets using true local shapes.
+
+Use this to isolate residual frame quality before reintroducing generated local geometry. It writes full parse-graph targets with predicted corrected `frame` values and true `geometry`/`atoms` payloads from the split dataset, so the output can be audited with `audit_manual_parse_graph_targets.py` and `audit_manual_parse_graph_spatial.py`.
+
 ### `scripts/train_manual_relative_layout_ar.py`
 
 Trains the relative layout AR generator.

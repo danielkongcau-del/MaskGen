@@ -265,6 +265,7 @@ def map_retrieved_layout_frames(
     used: set[int] = set()
     mapping_modes: Counter[str] = Counter()
     frame_by_node_index: dict[int, dict] = {}
+    node_mapping_modes: dict[int, str] = {}
 
     def choose_row(node: dict, *, level: str) -> tuple[int, dict] | None:
         key = _node_key(node, level=level)
@@ -299,9 +300,11 @@ def map_retrieved_layout_frames(
             selected_mode, frame = choose_fallback(node)
         frame_by_node_index[int(node_index)] = copy.deepcopy(frame)
         mapping_modes[selected_mode] += 1
+        node_mapping_modes[int(node_index)] = str(selected_mode)
 
     diagnostics = {
         "mapping_mode_histogram": dict(mapping_modes),
+        "node_mapping_modes": {str(key): value for key, value in sorted(node_mapping_modes.items())},
         "mapped_frame_count": int(len(frame_by_node_index)),
         "retrieved_frame_count": int(len(retrieved_rows)),
         "unused_retrieved_frame_count": int(len(retrieved_rows) - len(used)),
