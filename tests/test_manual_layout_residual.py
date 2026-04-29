@@ -16,6 +16,7 @@ from partition_gen.manual_layout_residual import (
     collate_layout_residual_examples,
     evaluate_layout_residual_regressor,
     frame_residual_target,
+    geometry_aware_scale_max,
     layout_residual_loss,
     residual_values_to_raw_scale,
     residual_values_to_frame,
@@ -132,6 +133,23 @@ class ManualLayoutResidualTest(unittest.TestCase):
         self.assertGreater(raw_scale, config.scale_max)
         self.assertEqual(decoded["scale"], config.scale_max)
 
+    def test_residual_frame_clamps_scale_to_local_bbox(self) -> None:
+        config = ParseGraphTokenizerConfig()
+        retrieved = {"origin": [64.0, 96.0], "scale": 512.0, "orientation": 0.0}
+        local_bbox = {"width": 2.0, "height": 1.0}
+
+        scale_max = geometry_aware_scale_max(local_bbox, config=config, max_bbox_side=384.0)
+        decoded = residual_values_to_frame(
+            [0.0, 0.0, 0.0, 0.0],
+            retrieved,
+            config=config,
+            local_bbox=local_bbox,
+            max_bbox_side=384.0,
+        )
+
+        self.assertEqual(scale_max, 192.0)
+        self.assertEqual(decoded["scale"], 192.0)
+
     def test_dataset_builds_retrieval_residual_examples(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             train = Path(tmpdir) / "split" / "train"
@@ -222,6 +240,7 @@ class ManualLayoutResidualTest(unittest.TestCase):
             self.assertIn("baseline_origin_mae", metrics)
             self.assertIn("scale_out_of_range_count", metrics)
             self.assertIn("bbox_huge_count", metrics)
+            self.assertIn("geometry_scale_clamped_count", metrics)
             self.assertEqual(targets[0]["metadata"]["attached_geometry_count"], 2)
             self.assertEqual(nodes_by_id["val_a_support"]["frame"]["origin"], [128.0, 128.0])
             self.assertEqual(nodes_by_id["val_a_insert"]["geometry"]["outer_local"][0], [-0.5, -0.5])

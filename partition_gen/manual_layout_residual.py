@@ -41,6 +41,7 @@ MAPPING_MODE_TO_ID = {
 }
 ID_TO_MAPPING_MODE = {value: key for key, value in MAPPING_MODE_TO_ID.items()}
 RESIDUAL_KEYS = ("delta_origin_x", "delta_origin_y", "delta_log_scale", "delta_orientation")
+DEFAULT_GEOMETRY_MAX_BBOX_SIDE_RATIO = 1.5
 
 
 def _frame_origin(frame: dict) -> tuple[float, float]:
@@ -62,6 +63,10 @@ def _scale_bounds(config: ParseGraphTokenizerConfig) -> tuple[float, float]:
 
 def _clamp(value: float, low: float, high: float) -> float:
     return float(max(float(low), min(float(high), float(value))))
+
+
+def default_geometry_max_bbox_side(config: ParseGraphTokenizerConfig) -> float:
+    return float(config.position_max) * float(DEFAULT_GEOMETRY_MAX_BBOX_SIDE_RATIO)
 
 
 def _numeric_stats(values: Sequence[float]) -> dict:
@@ -103,11 +108,34 @@ def residual_values_to_raw_scale(residual_values: Sequence[float] | torch.Tensor
     return float(_safe_scale(retrieved_frame.get("scale", 1.0)) * math.exp(delta_log_scale))
 
 
+def geometry_aware_scale_max(
+    local_bbox: dict | None,
+    *,
+    config: ParseGraphTokenizerConfig | None = None,
+    max_bbox_side: float | None = None,
+) -> float:
+    config = config or ParseGraphTokenizerConfig()
+    scale_min, scale_max = _scale_bounds(config)
+    side_limit = float(default_geometry_max_bbox_side(config) if max_bbox_side is None else max_bbox_side)
+    if not local_bbox:
+        return float(scale_max)
+    limits = [float(scale_max)]
+    width = abs(float(local_bbox.get("width", 0.0)))
+    height = abs(float(local_bbox.get("height", 0.0)))
+    if width > 1e-6:
+        limits.append(side_limit / width)
+    if height > 1e-6:
+        limits.append(side_limit / height)
+    return max(float(scale_min), float(min(limits)))
+
+
 def residual_values_to_frame(
     residual_values: Sequence[float] | torch.Tensor,
     retrieved_frame: dict,
     *,
     config: ParseGraphTokenizerConfig | None = None,
+    local_bbox: dict | None = None,
+    max_bbox_side: float | None = None,
 ) -> dict:
     config = config or ParseGraphTokenizerConfig()
     if isinstance(residual_values, torch.Tensor):
@@ -115,7 +143,8 @@ def residual_values_to_frame(
     retrieved_x, retrieved_y = _frame_origin(retrieved_frame)
     delta_x = max(-2.0, min(2.0, float(residual_values[0]))) * float(config.position_max)
     delta_y = max(-2.0, min(2.0, float(residual_values[1]))) * float(config.position_max)
-    scale_min, scale_max = _scale_bounds(config)
+    scale_min, _scale_max = _scale_bounds(config)
+    scale_max = geometry_aware_scale_max(local_bbox, config=config, max_bbox_side=max_bbox_side)
     raw_scale = residual_values_to_raw_scale(residual_values, retrieved_frame)
     delta_orientation = max(-2.0, min(2.0, float(residual_values[3]))) * math.pi
     return {
@@ -477,7 +506,12 @@ def predict_residual_frame(
 ) -> tuple[dict, list[float]]:
     model.eval()
     prediction = model(_batch_from_example(example, device=device))[0].detach().cpu()
-    frame = residual_values_to_frame(prediction, example["retrieved_frame"], config=config)
+    frame = residual_values_to_frame(
+        prediction,
+        example["retrieved_frame"],
+        config=config,
+        local_bbox=example.get("local_bbox"),
+    )
     return frame, [float(value) for value in prediction.tolist()]
 
 
@@ -506,11 +540,15 @@ def evaluate_layout_residual_regressor(
     bbox_widths: list[float] = []
     bbox_heights: list[float] = []
     bbox_areas: list[float] = []
-    scale_min, scale_max = _scale_bounds(config)
+    scale_min, tokenizer_scale_max = _scale_bounds(config)
     scale_below_min = 0
     scale_above_max = 0
+    scale_above_tokenizer_max = 0
+    geometry_scale_clamped = 0
+    effective_scale_max_values: list[float] = []
     bbox_huge_count = 0
     raw_bbox_huge_count = 0
+    max_bbox_side = default_geometry_max_bbox_side(config)
     huge_side_threshold = float(config.position_max) * 2.0
     huge_area_threshold = float(config.position_max) * float(config.position_max) * 4.0
 
@@ -528,11 +566,19 @@ def evaluate_layout_residual_regressor(
             target_frame = metadata["target_frame"]
             local_bbox = metadata.get("local_bbox")
             raw_scale = residual_values_to_raw_scale(predictions[row_index], retrieved_frame)
-            pred_frame = residual_values_to_frame(predictions[row_index], retrieved_frame, config=config)
+            effective_scale_max = geometry_aware_scale_max(local_bbox, config=config, max_bbox_side=max_bbox_side)
+            pred_frame = residual_values_to_frame(
+                predictions[row_index],
+                retrieved_frame,
+                config=config,
+                local_bbox=local_bbox,
+                max_bbox_side=max_bbox_side,
+            )
             raw_bbox = scaled_bbox_metrics(local_bbox, raw_scale)
             pred_bbox = scaled_bbox_metrics(local_bbox, float(pred_frame.get("scale", 1.0)))
             raw_scales.append(float(raw_scale))
             predicted_scales.append(float(pred_frame.get("scale", 1.0)))
+            effective_scale_max_values.append(float(effective_scale_max))
             raw_bbox_widths.append(float(raw_bbox["width"]))
             raw_bbox_heights.append(float(raw_bbox["height"]))
             raw_bbox_areas.append(float(raw_bbox["area"]))
@@ -540,7 +586,9 @@ def evaluate_layout_residual_regressor(
             bbox_heights.append(float(pred_bbox["height"]))
             bbox_areas.append(float(pred_bbox["area"]))
             scale_below_min += int(raw_scale < scale_min)
-            scale_above_max += int(raw_scale > scale_max)
+            scale_above_max += int(raw_scale > effective_scale_max)
+            scale_above_tokenizer_max += int(raw_scale > tokenizer_scale_max)
+            geometry_scale_clamped += int(raw_scale <= tokenizer_scale_max and raw_scale > effective_scale_max)
             raw_bbox_huge_count += int(
                 raw_bbox["width"] > huge_side_threshold
                 or raw_bbox["height"] > huge_side_threshold
@@ -579,11 +627,15 @@ def evaluate_layout_residual_regressor(
         "mapping_mode_histogram": {key: int(value) for key, value in sorted(mapping_modes.items())},
         "retrieval_score_stats": _numeric_stats(retrieval_scores),
         "scale_min": float(scale_min),
-        "scale_max": float(scale_max),
+        "scale_max": float(tokenizer_scale_max),
+        "geometry_max_bbox_side": float(max_bbox_side),
+        "effective_scale_max_stats": _numeric_stats(effective_scale_max_values),
         "raw_predicted_scale_stats": _numeric_stats(raw_scales),
         "predicted_scale_stats": _numeric_stats(predicted_scales),
         "scale_below_min_count": int(scale_below_min),
         "scale_above_max_count": int(scale_above_max),
+        "scale_above_tokenizer_max_count": int(scale_above_tokenizer_max),
+        "geometry_scale_clamped_count": int(geometry_scale_clamped),
         "scale_out_of_range_count": int(scale_below_min + scale_above_max),
         "scale_clamped_count": int(scale_below_min + scale_above_max),
         "raw_bbox_width_stats": _numeric_stats(raw_bbox_widths),
@@ -697,6 +749,7 @@ def attach_retrieved_residual_layout_to_split_targets(
                         topology_target,
                         node_index=int(node_index),
                         retrieved_frame=retrieved_frame,
+                        local_bbox=geometry_local_bbox(geometry_target),
                         retrieval_score=float(retrieval_score),
                         mapping_mode=node_mapping_modes.get(int(node_index), "unknown"),
                         config=tokenizer_config,
