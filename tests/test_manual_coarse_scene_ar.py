@@ -385,9 +385,46 @@ class ManualCoarseSceneARTest(unittest.TestCase):
 
         summary = _repair_adjacent_true_shape_frames(nodes, relations)
 
-        self.assertGreater(summary["repair_count"], 1)
-        self.assertGreater(summary["iteration_count"], 1)
+        self.assertEqual(summary["solver"], "candidate_projection")
+        self.assertGreaterEqual(summary["repair_count"], 1)
         self.assertLessEqual(_bbox_gap(nodes[0]["coarse_bbox"], nodes[1]["coarse_bbox"]), 4.0)
+
+    def test_true_shape_adjacent_repair_avoids_peer_overlap(self) -> None:
+        nodes = [
+            {
+                "id": "support_0",
+                "role": "support_region",
+                "frame": {"origin": [5.0, 5.0], "scale": 10.0, "orientation": 0.0},
+                "coarse_bbox": [0.0, 0.0, 10.0, 10.0],
+                "true_shape_local_bbox": {"min_x": -0.5, "min_y": -0.5, "width": 1.0, "height": 1.0},
+            },
+            {
+                "id": "support_1",
+                "role": "support_region",
+                "frame": {"origin": [15.0, 5.0], "scale": 10.0, "orientation": 0.0},
+                "coarse_bbox": [10.0, 0.0, 20.0, 10.0],
+                "true_shape_local_bbox": {"min_x": -0.5, "min_y": -0.5, "width": 1.0, "height": 1.0},
+            },
+            {
+                "id": "support_2",
+                "role": "support_region",
+                "frame": {"origin": [105.0, 5.0], "scale": 10.0, "orientation": 0.0},
+                "coarse_bbox": [100.0, 0.0, 110.0, 10.0],
+                "true_shape_local_bbox": {"min_x": -0.5, "min_y": -0.5, "width": 1.0, "height": 1.0},
+            },
+        ]
+        relations = [
+            {"type": "adjacent_to", "faces": ["support_0", "support_1"]},
+            {"type": "adjacent_to", "faces": ["support_0", "support_2"]},
+        ]
+
+        _repair_adjacent_true_shape_frames(nodes, relations)
+        overlap = _bbox_area(_bbox_intersection(nodes[1]["coarse_bbox"], nodes[2]["coarse_bbox"])) / max(
+            1e-6, min(_bbox_area(nodes[1]["coarse_bbox"]), _bbox_area(nodes[2]["coarse_bbox"]))
+        )
+
+        self.assertLessEqual(_bbox_gap(nodes[0]["coarse_bbox"], nodes[2]["coarse_bbox"]), 4.0)
+        self.assertLessEqual(overlap, 0.1)
 
     def test_build_rows_writes_summary_and_dataset_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

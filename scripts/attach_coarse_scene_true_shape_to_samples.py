@@ -40,6 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adjacent-repair-iterations", type=int, default=5)
     parser.add_argument("--adjacent-repair-damping", type=float, default=0.8)
     parser.add_argument("--adjacent-repair-max-gap", type=float, default=4.0)
+    parser.add_argument("--adjacent-repair-max-overlap-ratio", type=float, default=0.1)
     parser.add_argument("--progress-every", type=int, default=25)
     return parser.parse_args()
 
@@ -81,6 +82,31 @@ def _bbox_gap(left: list[float], right: list[float]) -> float:
     dx = max(float(right[0]) - float(left[2]), float(left[0]) - float(right[2]), 0.0)
     dy = max(float(right[1]) - float(left[3]), float(left[1]) - float(right[3]), 0.0)
     return float(math.hypot(dx, dy))
+
+
+def _bbox_intersection(left: list[float], right: list[float]) -> list[float] | None:
+    min_x = max(float(left[0]), float(right[0]))
+    min_y = max(float(left[1]), float(right[1]))
+    max_x = min(float(left[2]), float(right[2]))
+    max_y = min(float(left[3]), float(right[3]))
+    if max_x <= min_x or max_y <= min_y:
+        return None
+    return [float(min_x), float(min_y), float(max_x), float(max_y)]
+
+
+def _bbox_area(bbox: list[float] | None) -> float:
+    if bbox is None:
+        return 0.0
+    return max(0.0, float(bbox[2]) - float(bbox[0])) * max(0.0, float(bbox[3]) - float(bbox[1]))
+
+
+def _bbox_overlap_ratio(left: list[float], right: list[float]) -> float:
+    inter = _bbox_intersection(left, right)
+    return float(_bbox_area(inter) / max(1e-6, min(_bbox_area(left), _bbox_area(right))))
+
+
+def _shift_bbox(bbox: list[float], dx: float, dy: float) -> list[float]:
+    return [float(bbox[0]) + float(dx), float(bbox[1]) + float(dy), float(bbox[2]) + float(dx), float(bbox[3]) + float(dy)]
 
 
 def _bbox_from_local_bbox(frame: dict, local_bbox: dict) -> list[float] | None:
@@ -176,6 +202,160 @@ def _adjacent_repair_children(relations: list[dict]) -> dict[str, list[str]]:
     return {key: list(dict.fromkeys(values)) for key, values in children.items()}
 
 
+def _adjacent_pairs(relations: list[dict]) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    for relation in relations:
+        if str(relation.get("type", "")) != "adjacent_to":
+            continue
+        faces = [str(value) for value in relation.get("faces", []) or []]
+        if len(faces) >= 2:
+            pairs.append((faces[0], faces[1]))
+    return pairs
+
+
+def _subtree_node_ids(root_id: str, children: dict[str, list[str]]) -> set[str]:
+    output: set[str] = set()
+    stack = [str(root_id)]
+    while stack:
+        node_id = stack.pop()
+        if node_id in output:
+            continue
+        output.add(node_id)
+        stack.extend(children.get(node_id, []))
+    return output
+
+
+def _shifted_bbox_map(bboxes: dict[str, list[float]], shifted_ids: set[str], dx: float, dy: float) -> dict[str, list[float]]:
+    output = dict(bboxes)
+    for node_id in shifted_ids:
+        if node_id in output:
+            output[node_id] = _shift_bbox(output[node_id], dx, dy)
+    return output
+
+
+def _adjacent_pair_score(
+    left: list[float],
+    right: list[float],
+    *,
+    max_gap: float,
+    max_overlap_ratio: float,
+) -> tuple[int, int, float]:
+    gap_value = _bbox_gap(left, right)
+    overlap = _bbox_overlap_ratio(left, right)
+    overlap_fail = int(overlap > max_overlap_ratio)
+    gap_fail = int(gap_value > max_gap)
+    penalty = max(0.0, overlap - max_overlap_ratio) * 100.0 + max(0.0, gap_value - max_gap)
+    return overlap_fail, gap_fail, float(penalty)
+
+
+def _affected_constraint_score(
+    bboxes: dict[str, list[float]],
+    nodes: list[dict],
+    adjacent_pairs: list[tuple[str, str]],
+    affected_node_ids: set[str],
+    *,
+    max_gap: float,
+    max_overlap_ratio: float,
+) -> tuple[int, int, float]:
+    overlap_failures = 0
+    gap_failures = 0
+    penalty = 0.0
+    for left_id, right_id in adjacent_pairs:
+        if left_id not in affected_node_ids and right_id not in affected_node_ids:
+            continue
+        left_bbox = bboxes.get(left_id)
+        right_bbox = bboxes.get(right_id)
+        if left_bbox is None or right_bbox is None:
+            continue
+        overlap_fail, gap_fail, pair_penalty = _adjacent_pair_score(
+            left_bbox,
+            right_bbox,
+            max_gap=max_gap,
+            max_overlap_ratio=max_overlap_ratio,
+        )
+        overlap_failures += overlap_fail
+        gap_failures += gap_fail
+        penalty += pair_penalty
+
+    movable_support_ids = [
+        str(node.get("id"))
+        for node in nodes
+        if str(node.get("id")) in affected_node_ids and str(node.get("role", "")) in {"support_region", "residual_region"}
+    ]
+    peer_support_ids = [
+        str(node.get("id"))
+        for node in nodes
+        if str(node.get("id")) not in affected_node_ids and str(node.get("role", "")) in {"support_region", "residual_region"}
+    ]
+    for left_id in movable_support_ids:
+        left_bbox = bboxes.get(left_id)
+        if left_bbox is None:
+            continue
+        for right_id in peer_support_ids:
+            right_bbox = bboxes.get(right_id)
+            if right_bbox is None:
+                continue
+            overlap = _bbox_overlap_ratio(left_bbox, right_bbox)
+            if overlap > max_overlap_ratio:
+                overlap_failures += 1
+                penalty += (overlap - max_overlap_ratio) * 100.0
+    return int(overlap_failures), int(gap_failures), float(penalty)
+
+
+def _adjacent_candidate_deltas(
+    child_bbox: list[float],
+    anchor_bbox: list[float],
+    *,
+    child_coarse: list[float],
+    anchor_coarse: list[float],
+    gap: float,
+) -> list[tuple[float, float]]:
+    child = _bbox_metrics(child_bbox)
+    anchor = _bbox_metrics(anchor_bbox)
+    side = _adjacent_side(child_coarse, anchor_coarse)
+
+    def cross_centers(axis: str) -> list[float]:
+        if axis == "y":
+            span = min(child["height"], anchor["height"])
+            low = anchor["min_y"] + span / 2.0
+            high = anchor["max_y"] - span / 2.0
+            decoded = child["center_y"]
+        else:
+            span = min(child["width"], anchor["width"])
+            low = anchor["min_x"] + span / 2.0
+            high = anchor["max_x"] - span / 2.0
+            decoded = child["center_x"]
+        if high < low:
+            low = high = (low + high) / 2.0
+        values = [
+            max(low, min(high, decoded)),
+            (low + high) / 2.0,
+            low,
+            high,
+            low + (high - low) * 0.25,
+            low + (high - low) * 0.75,
+        ]
+        return list(dict.fromkeys(float(value) for value in values))
+
+    def target_center(candidate_side: int, cross_center: float) -> tuple[float, float]:
+        if candidate_side == 0:
+            return anchor["max_x"] + float(gap) + child["width"] / 2.0, cross_center
+        if candidate_side == 1:
+            return anchor["min_x"] - float(gap) - child["width"] / 2.0, cross_center
+        if candidate_side == 2:
+            return cross_center, anchor["max_y"] + float(gap) + child["height"] / 2.0
+        return cross_center, anchor["min_y"] - float(gap) - child["height"] / 2.0
+
+    deltas: list[tuple[float, float]] = []
+    side_order = [side, *[candidate for candidate in (0, 1, 2, 3) if candidate != side]]
+    for candidate_side in side_order:
+        axis = "y" if candidate_side in {0, 1} else "x"
+        for cross_center in cross_centers(axis):
+            target_x, target_y = target_center(candidate_side, cross_center)
+            deltas.append((float(target_x - child["center_x"]), float(target_y - child["center_y"])))
+    return list(dict.fromkeys(deltas))
+
+
 def _repair_adjacent_true_shape_frames(
     nodes: list[dict],
     relations: list[dict],
@@ -184,6 +364,7 @@ def _repair_adjacent_true_shape_frames(
     max_gap: float = 4.0,
     max_iterations: int = 5,
     damping: float = 0.8,
+    max_overlap_ratio: float = 0.1,
 ) -> dict:
     node_by_id = {str(node.get("id")): node for node in nodes if node.get("id") is not None}
     children = _adjacent_repair_children(relations)
@@ -191,9 +372,10 @@ def _repair_adjacent_true_shape_frames(
     repair_count = 0
     rounds: list[dict] = []
     max_iterations = max(0, int(max_iterations))
-    damping = max(0.0, min(1.0, float(damping)))
+    _legacy_damping = max(0.0, min(1.0, float(damping)))
     max_gap = max(0.0, float(max_gap))
     gap = max(0.0, float(gap))
+    max_overlap_ratio = max(0.0, float(max_overlap_ratio))
 
     def shift_subtree(root_id: str, dx: float, dy: float) -> None:
         stack = [root_id]
@@ -212,53 +394,23 @@ def _repair_adjacent_true_shape_frames(
             total[1] += float(dy)
             stack.extend(children.get(node_id, []))
 
-    adjacent_relations = [relation for relation in relations if str(relation.get("type", "")) == "adjacent_to"]
+    adjacent_pairs = _adjacent_pairs(relations)
     for iteration in range(max_iterations):
-        proposals: dict[str, list[tuple[float, float]]] = {}
+        bboxes = {node_id: bbox for node_id, node in node_by_id.items() if (bbox := _node_repair_bbox(node)) is not None}
         max_gap_before = 0.0
-        relation_repair_count = 0
-        for relation in adjacent_relations:
-            faces = [str(value) for value in relation.get("faces", []) or []]
-            if len(faces) < 2:
-                continue
-            anchor_id, child_id = faces[0], faces[1]
-            anchor_node = node_by_id.get(anchor_id)
-            child_node = node_by_id.get(child_id)
-            if anchor_node is None or child_node is None:
-                continue
-            anchor_bbox = _node_repair_bbox(anchor_node)
-            child_bbox = _node_repair_bbox(child_node)
+        target_pairs: list[tuple[float, str, str]] = []
+        for anchor_id, child_id in adjacent_pairs:
+            anchor_bbox = bboxes.get(anchor_id)
+            child_bbox = bboxes.get(child_id)
             if anchor_bbox is None or child_bbox is None:
                 continue
-            current_gap = _bbox_gap(anchor_bbox, child_bbox)
-            max_gap_before = max(max_gap_before, float(current_gap))
-            if current_gap <= max_gap:
-                continue
-            anchor_coarse = anchor_node.get("coarse_bbox") if isinstance(anchor_node.get("coarse_bbox"), list) else anchor_bbox
-            child_coarse = child_node.get("coarse_bbox") if isinstance(child_node.get("coarse_bbox"), list) else child_bbox
-            side = _adjacent_side([float(value) for value in child_coarse], [float(value) for value in anchor_coarse])
-            anchor = _bbox_metrics(anchor_bbox)
-            child = _bbox_metrics(child_bbox)
-            dx = 0.0
-            dy = 0.0
-            if side == 0:
-                dx = anchor["max_x"] + gap - child["min_x"]
-                dy = anchor["center_y"] - child["center_y"]
-            elif side == 1:
-                dx = anchor["min_x"] - gap - child["max_x"]
-                dy = anchor["center_y"] - child["center_y"]
-            elif side == 2:
-                dx = anchor["center_x"] - child["center_x"]
-                dy = anchor["max_y"] + gap - child["min_y"]
-            else:
-                dx = anchor["center_x"] - child["center_x"]
-                dy = anchor["min_y"] - gap - child["max_y"]
-            if abs(dx) <= 1e-6 and abs(dy) <= 1e-6:
-                continue
-            proposals.setdefault(child_id, []).append((float(dx), float(dy)))
-            relation_repair_count += 1
+            gap_value = _bbox_gap(anchor_bbox, child_bbox)
+            overlap = _bbox_overlap_ratio(anchor_bbox, child_bbox)
+            max_gap_before = max(max_gap_before, float(gap_value))
+            if gap_value > max_gap or overlap > max_overlap_ratio:
+                target_pairs.append((max(gap_value - max_gap, 0.0) + max(overlap - max_overlap_ratio, 0.0) * 100.0, anchor_id, child_id))
 
-        if not proposals:
+        if not target_pairs:
             rounds.append(
                 {
                     "iteration": int(iteration),
@@ -270,15 +422,60 @@ def _repair_adjacent_true_shape_frames(
             break
 
         applied_root_count = 0
-        for child_id, deltas in proposals.items():
-            dx = sum(delta[0] for delta in deltas) / max(1, len(deltas))
-            dy = sum(delta[1] for delta in deltas) / max(1, len(deltas))
-            dx *= damping
-            dy *= damping
-            if abs(dx) <= 1e-6 and abs(dy) <= 1e-6:
+        relation_repair_count = 0
+        for _severity, anchor_id, child_id in sorted(target_pairs, reverse=True):
+            bboxes = {node_id: bbox for node_id, node in node_by_id.items() if (bbox := _node_repair_bbox(node)) is not None}
+            anchor_node = node_by_id.get(anchor_id)
+            child_node = node_by_id.get(child_id)
+            if anchor_node is None or child_node is None:
                 continue
+            anchor_bbox = bboxes.get(anchor_id)
+            child_bbox = bboxes.get(child_id)
+            if anchor_bbox is None or child_bbox is None:
+                continue
+            current_pair_score = _adjacent_pair_score(anchor_bbox, child_bbox, max_gap=max_gap, max_overlap_ratio=max_overlap_ratio)
+            if current_pair_score[0] == 0 and current_pair_score[1] == 0:
+                continue
+            anchor_coarse = anchor_node.get("coarse_bbox") if isinstance(anchor_node.get("coarse_bbox"), list) else anchor_bbox
+            child_coarse = child_node.get("coarse_bbox") if isinstance(child_node.get("coarse_bbox"), list) else child_bbox
+            subtree_ids = _subtree_node_ids(child_id, children)
+            base_score = _affected_constraint_score(
+                bboxes,
+                nodes,
+                adjacent_pairs,
+                subtree_ids,
+                max_gap=max_gap,
+                max_overlap_ratio=max_overlap_ratio,
+            )
+            best_score = base_score
+            best_delta: tuple[float, float] | None = None
+            for dx, dy in _adjacent_candidate_deltas(
+                child_bbox,
+                anchor_bbox,
+                child_coarse=[float(value) for value in child_coarse],
+                anchor_coarse=[float(value) for value in anchor_coarse],
+                gap=gap,
+            ):
+                if abs(dx) <= 1e-6 and abs(dy) <= 1e-6:
+                    continue
+                candidate_bboxes = _shifted_bbox_map(bboxes, subtree_ids, dx, dy)
+                candidate_score = _affected_constraint_score(
+                    candidate_bboxes,
+                    nodes,
+                    adjacent_pairs,
+                    subtree_ids,
+                    max_gap=max_gap,
+                    max_overlap_ratio=max_overlap_ratio,
+                )
+                if candidate_score < best_score:
+                    best_score = candidate_score
+                    best_delta = (float(dx), float(dy))
+            if best_delta is None:
+                continue
+            dx, dy = best_delta
             shift_subtree(child_id, dx, dy)
             applied_root_count += 1
+            relation_repair_count += 1
         repair_count += int(relation_repair_count)
         rounds.append(
             {
@@ -294,9 +491,11 @@ def _repair_adjacent_true_shape_frames(
         "shifted_node_count": int(len(shift_totals)),
         "iteration_count": int(len(rounds)),
         "max_iterations": int(max_iterations),
-        "damping": float(damping),
+        "damping": float(_legacy_damping),
         "max_gap": float(max_gap),
+        "max_overlap_ratio": float(max_overlap_ratio),
         "target_gap": float(gap),
+        "solver": "candidate_projection",
         "rounds": rounds,
         "shift_by_node": {key: [float(values[0]), float(values[1])] for key, values in shift_totals.items()},
     }
@@ -448,7 +647,9 @@ def main() -> None:
                 "max_iterations": int(args.adjacent_repair_iterations),
                 "damping": float(args.adjacent_repair_damping),
                 "max_gap": float(args.adjacent_repair_max_gap),
+                "max_overlap_ratio": float(args.adjacent_repair_max_overlap_ratio),
                 "target_gap": 0.0,
+                "solver": "disabled",
                 "rounds": [],
                 "shift_by_node": {},
             }
@@ -459,6 +660,7 @@ def main() -> None:
                 max_gap=float(args.adjacent_repair_max_gap),
                 max_iterations=int(args.adjacent_repair_iterations),
                 damping=float(args.adjacent_repair_damping),
+                max_overlap_ratio=float(args.adjacent_repair_max_overlap_ratio),
             )
             shifts = adjacent_frame_repair.get("shift_by_node", {}) or {}
             if shifts:
@@ -529,6 +731,8 @@ def main() -> None:
             "max_iterations": int(args.adjacent_repair_iterations),
             "damping": float(args.adjacent_repair_damping),
             "max_gap": float(args.adjacent_repair_max_gap),
+            "max_overlap_ratio": float(args.adjacent_repair_max_overlap_ratio),
+            "solver": "candidate_projection",
         },
     }
     dump_json(args.output_root / "summary.json", summary)
