@@ -390,6 +390,12 @@ Audits spatial placement of renderable polygon nodes in full manual `parse_graph
 
 It uses the same local-to-world transform as the visualization script, then reports whether polygon bboxes intersect the canvas, whether origins or bbox centers are near edges/corners, bbox size statistics, and origin/role/label histograms. This is useful for diagnosing geometry generators that are structurally valid but render mostly blank or collapsed into corners.
 
+### `scripts/audit_manual_parse_graph_relation_spatial.py`
+
+Audits whether semantic relations are spatially plausible in rendered full manual `parse_graph` targets.
+
+It converts renderable polygon nodes into world-space bboxes, derives group bboxes from `contains` children when the group node has no geometry, then checks `inserted_in`, `contains`, `divides`, and `adjacent_to` relation pairs. The JSON and Markdown summaries report pass/fail counts by relation type, failure reasons, role-pair failures, and top failed relation examples, making it easier to decide whether layout/topology relations or local geometry generation is the current bottleneck.
+
 ### `scripts/inspect_manual_parse_graph_spatial_failures.py`
 
 Exports and summarizes the failed nodes behind a spatial audit.
