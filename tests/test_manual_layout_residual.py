@@ -13,6 +13,7 @@ from partition_gen.manual_layout_residual import (
     ManualLayoutResidualRegressorConfig,
     attach_retrieved_residual_layout_to_split_targets,
     build_layout_residual_example,
+    clamp_frame_to_local_bbox,
     collate_layout_residual_examples,
     evaluate_layout_residual_regressor,
     frame_residual_target,
@@ -149,6 +150,24 @@ class ManualLayoutResidualTest(unittest.TestCase):
 
         self.assertEqual(scale_max, 192.0)
         self.assertEqual(decoded["scale"], 192.0)
+
+    def test_clamp_frame_to_local_bbox_reports_geometry_clamp(self) -> None:
+        config = ParseGraphTokenizerConfig()
+        frame = {"origin": [64.0, 96.0], "scale": 512.0, "orientation": 0.0}
+        local_bbox = {"width": 4.0, "height": 1.0}
+
+        clamped, diagnostics = clamp_frame_to_local_bbox(
+            frame,
+            local_bbox,
+            config=config,
+            max_bbox_side=384.0,
+        )
+
+        self.assertEqual(clamped["origin"], frame["origin"])
+        self.assertEqual(clamped["orientation"], frame["orientation"])
+        self.assertEqual(clamped["scale"], 96.0)
+        self.assertTrue(diagnostics["geometry_scale_clamped"])
+        self.assertTrue(diagnostics["geometry_frame_clamp_strong"])
 
     def test_dataset_builds_retrieval_residual_examples(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

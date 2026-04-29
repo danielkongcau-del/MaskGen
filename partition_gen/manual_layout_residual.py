@@ -129,6 +129,37 @@ def geometry_aware_scale_max(
     return max(float(scale_min), float(min(limits)))
 
 
+def clamp_frame_to_local_bbox(
+    frame: dict,
+    local_bbox: dict | None,
+    *,
+    config: ParseGraphTokenizerConfig | None = None,
+    max_bbox_side: float | None = None,
+    strong_clamp_ratio: float = 0.5,
+) -> tuple[dict, dict]:
+    config = config or ParseGraphTokenizerConfig()
+    scale_min, tokenizer_scale_max = _scale_bounds(config)
+    effective_scale_max = geometry_aware_scale_max(local_bbox, config=config, max_bbox_side=max_bbox_side)
+    raw_scale = float(frame.get("scale", 1.0))
+    final_scale = _clamp(raw_scale, scale_min, effective_scale_max)
+    output = copy.deepcopy(frame)
+    output["scale"] = float(final_scale)
+    scale_ratio = float(final_scale / raw_scale) if abs(raw_scale) > 1e-12 else 1.0
+    return output, {
+        "raw_scale": float(raw_scale),
+        "final_scale": float(final_scale),
+        "scale_ratio": float(scale_ratio),
+        "scale_min": float(scale_min),
+        "tokenizer_scale_max": float(tokenizer_scale_max),
+        "effective_scale_max": float(effective_scale_max),
+        "max_bbox_side": float(default_geometry_max_bbox_side(config) if max_bbox_side is None else max_bbox_side),
+        "scale_clamped": bool(abs(final_scale - raw_scale) > 1e-9),
+        "tokenizer_scale_clamped": bool(raw_scale > tokenizer_scale_max or raw_scale < scale_min),
+        "geometry_scale_clamped": bool(raw_scale <= tokenizer_scale_max and raw_scale > effective_scale_max),
+        "geometry_frame_clamp_strong": bool(scale_ratio < float(strong_clamp_ratio)),
+    }
+
+
 def residual_values_to_frame(
     residual_values: Sequence[float] | torch.Tensor,
     retrieved_frame: dict,
@@ -143,18 +174,23 @@ def residual_values_to_frame(
     retrieved_x, retrieved_y = _frame_origin(retrieved_frame)
     delta_x = max(-2.0, min(2.0, float(residual_values[0]))) * float(config.position_max)
     delta_y = max(-2.0, min(2.0, float(residual_values[1]))) * float(config.position_max)
-    scale_min, _scale_max = _scale_bounds(config)
-    scale_max = geometry_aware_scale_max(local_bbox, config=config, max_bbox_side=max_bbox_side)
     raw_scale = residual_values_to_raw_scale(residual_values, retrieved_frame)
     delta_orientation = max(-2.0, min(2.0, float(residual_values[3]))) * math.pi
-    return {
+    raw_frame = {
         "origin": [
             float(retrieved_x + delta_x),
             float(retrieved_y + delta_y),
         ],
-        "scale": _clamp(raw_scale, scale_min, scale_max),
+        "scale": float(raw_scale),
         "orientation": _wrap_angle(float(retrieved_frame.get("orientation", 0.0)) + delta_orientation),
     }
+    frame, _diagnostics = clamp_frame_to_local_bbox(
+        raw_frame,
+        local_bbox,
+        config=config,
+        max_bbox_side=max_bbox_side,
+    )
+    return frame
 
 
 def geometry_local_bbox(geometry_target: dict) -> dict:

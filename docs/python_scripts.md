@@ -288,6 +288,18 @@ Attaches residual-corrected retrieved layouts to split targets using true local 
 
 Use this to isolate residual frame quality before reintroducing generated local geometry. It writes full parse-graph targets with predicted corrected `frame` values and true `geometry`/`atoms` payloads from the split dataset, so the output can be audited with `audit_manual_parse_graph_targets.py` and `audit_manual_parse_graph_spatial.py`.
 
+### `scripts/attach_retrieved_residual_layout_oracle_frame_geometry_to_split_targets.py`
+
+Attaches generated local geometry to split topology using residual-corrected retrieved-layout frames.
+
+It retrieves the nearest train layout, predicts a residual frame correction per renderable node, uses the refined frame as the forced oracle-frame geometry prefix, then computes the generated local bbox and clamps the final frame by that bbox before writing the full parse graph. This is the split-target diagnostic for the full "retrieve layout, adjust frame, generate local shape, clamp by generated bbox" chain.
+
+### `scripts/attach_retrieved_residual_layout_oracle_frame_geometry_to_topology_samples.py`
+
+Attaches residual-corrected retrieved-layout frames and generated local geometry to generated topology samples.
+
+It decodes semantic-valid generated topology rows, retrieves a similar train layout, applies the residual frame predictor, samples local `POLYS`/`ATOMS` from the oracle-frame geometry checkpoint, clamps the final frame with the generated local bbox, and writes full parse-graph targets plus per-node frame/refinement/clamp diagnostics.
+
 ### `scripts/train_manual_relative_layout_ar.py`
 
 Trains the relative layout AR generator.
