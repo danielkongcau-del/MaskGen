@@ -37,6 +37,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-true-shape-local-bbox-side", type=float, default=1e-6)
     parser.add_argument("--scale-fit-mode", type=str, default="cover", choices=["cover", "contain", "frame"])
     parser.add_argument("--disable-adjacent-frame-repair", action="store_true")
+    parser.add_argument("--adjacent-repair-iterations", type=int, default=5)
+    parser.add_argument("--adjacent-repair-damping", type=float, default=0.8)
+    parser.add_argument("--adjacent-repair-max-gap", type=float, default=4.0)
     parser.add_argument("--progress-every", type=int, default=25)
     return parser.parse_args()
 
@@ -72,6 +75,12 @@ def _bbox_metrics(bbox: list[float]) -> dict:
         "center_x": float((float(bbox[0]) + float(bbox[2])) / 2.0),
         "center_y": float((float(bbox[1]) + float(bbox[3])) / 2.0),
     }
+
+
+def _bbox_gap(left: list[float], right: list[float]) -> float:
+    dx = max(float(right[0]) - float(left[2]), float(left[0]) - float(right[2]), 0.0)
+    dy = max(float(right[1]) - float(left[3]), float(left[1]) - float(right[3]), 0.0)
+    return float(math.hypot(dx, dy))
 
 
 def _bbox_from_local_bbox(frame: dict, local_bbox: dict) -> list[float] | None:
@@ -167,11 +176,24 @@ def _adjacent_repair_children(relations: list[dict]) -> dict[str, list[str]]:
     return {key: list(dict.fromkeys(values)) for key, values in children.items()}
 
 
-def _repair_adjacent_true_shape_frames(nodes: list[dict], relations: list[dict], *, gap: float = 0.0) -> dict:
+def _repair_adjacent_true_shape_frames(
+    nodes: list[dict],
+    relations: list[dict],
+    *,
+    gap: float = 0.0,
+    max_gap: float = 4.0,
+    max_iterations: int = 5,
+    damping: float = 0.8,
+) -> dict:
     node_by_id = {str(node.get("id")): node for node in nodes if node.get("id") is not None}
     children = _adjacent_repair_children(relations)
     shift_totals: dict[str, list[float]] = {}
     repair_count = 0
+    rounds: list[dict] = []
+    max_iterations = max(0, int(max_iterations))
+    damping = max(0.0, min(1.0, float(damping)))
+    max_gap = max(0.0, float(max_gap))
+    gap = max(0.0, float(gap))
 
     def shift_subtree(root_id: str, dx: float, dy: float) -> None:
         stack = [root_id]
@@ -190,48 +212,92 @@ def _repair_adjacent_true_shape_frames(nodes: list[dict], relations: list[dict],
             total[1] += float(dy)
             stack.extend(children.get(node_id, []))
 
-    for relation in relations:
-        if str(relation.get("type", "")) != "adjacent_to":
-            continue
-        faces = [str(value) for value in relation.get("faces", []) or []]
-        if len(faces) < 2:
-            continue
-        anchor_id, child_id = faces[0], faces[1]
-        anchor_node = node_by_id.get(anchor_id)
-        child_node = node_by_id.get(child_id)
-        if anchor_node is None or child_node is None:
-            continue
-        anchor_bbox = _node_repair_bbox(anchor_node)
-        child_bbox = _node_repair_bbox(child_node)
-        if anchor_bbox is None or child_bbox is None:
-            continue
-        anchor_coarse = anchor_node.get("coarse_bbox") if isinstance(anchor_node.get("coarse_bbox"), list) else anchor_bbox
-        child_coarse = child_node.get("coarse_bbox") if isinstance(child_node.get("coarse_bbox"), list) else child_bbox
-        side = _adjacent_side([float(value) for value in child_coarse], [float(value) for value in anchor_coarse])
-        anchor = _bbox_metrics(anchor_bbox)
-        child = _bbox_metrics(child_bbox)
-        dx = 0.0
-        dy = 0.0
-        if side == 0:
-            dx = anchor["max_x"] + float(gap) - child["min_x"]
-            dy = anchor["center_y"] - child["center_y"]
-        elif side == 1:
-            dx = anchor["min_x"] - float(gap) - child["max_x"]
-            dy = anchor["center_y"] - child["center_y"]
-        elif side == 2:
-            dx = anchor["center_x"] - child["center_x"]
-            dy = anchor["max_y"] + float(gap) - child["min_y"]
-        else:
-            dx = anchor["center_x"] - child["center_x"]
-            dy = anchor["min_y"] - float(gap) - child["max_y"]
-        if abs(dx) <= 1e-6 and abs(dy) <= 1e-6:
-            continue
-        shift_subtree(child_id, dx, dy)
-        repair_count += 1
+    adjacent_relations = [relation for relation in relations if str(relation.get("type", "")) == "adjacent_to"]
+    for iteration in range(max_iterations):
+        proposals: dict[str, list[tuple[float, float]]] = {}
+        max_gap_before = 0.0
+        relation_repair_count = 0
+        for relation in adjacent_relations:
+            faces = [str(value) for value in relation.get("faces", []) or []]
+            if len(faces) < 2:
+                continue
+            anchor_id, child_id = faces[0], faces[1]
+            anchor_node = node_by_id.get(anchor_id)
+            child_node = node_by_id.get(child_id)
+            if anchor_node is None or child_node is None:
+                continue
+            anchor_bbox = _node_repair_bbox(anchor_node)
+            child_bbox = _node_repair_bbox(child_node)
+            if anchor_bbox is None or child_bbox is None:
+                continue
+            current_gap = _bbox_gap(anchor_bbox, child_bbox)
+            max_gap_before = max(max_gap_before, float(current_gap))
+            if current_gap <= max_gap:
+                continue
+            anchor_coarse = anchor_node.get("coarse_bbox") if isinstance(anchor_node.get("coarse_bbox"), list) else anchor_bbox
+            child_coarse = child_node.get("coarse_bbox") if isinstance(child_node.get("coarse_bbox"), list) else child_bbox
+            side = _adjacent_side([float(value) for value in child_coarse], [float(value) for value in anchor_coarse])
+            anchor = _bbox_metrics(anchor_bbox)
+            child = _bbox_metrics(child_bbox)
+            dx = 0.0
+            dy = 0.0
+            if side == 0:
+                dx = anchor["max_x"] + gap - child["min_x"]
+                dy = anchor["center_y"] - child["center_y"]
+            elif side == 1:
+                dx = anchor["min_x"] - gap - child["max_x"]
+                dy = anchor["center_y"] - child["center_y"]
+            elif side == 2:
+                dx = anchor["center_x"] - child["center_x"]
+                dy = anchor["max_y"] + gap - child["min_y"]
+            else:
+                dx = anchor["center_x"] - child["center_x"]
+                dy = anchor["min_y"] - gap - child["max_y"]
+            if abs(dx) <= 1e-6 and abs(dy) <= 1e-6:
+                continue
+            proposals.setdefault(child_id, []).append((float(dx), float(dy)))
+            relation_repair_count += 1
+
+        if not proposals:
+            rounds.append(
+                {
+                    "iteration": int(iteration),
+                    "relation_repair_count": 0,
+                    "applied_root_count": 0,
+                    "max_gap_before": float(max_gap_before),
+                }
+            )
+            break
+
+        applied_root_count = 0
+        for child_id, deltas in proposals.items():
+            dx = sum(delta[0] for delta in deltas) / max(1, len(deltas))
+            dy = sum(delta[1] for delta in deltas) / max(1, len(deltas))
+            dx *= damping
+            dy *= damping
+            if abs(dx) <= 1e-6 and abs(dy) <= 1e-6:
+                continue
+            shift_subtree(child_id, dx, dy)
+            applied_root_count += 1
+        repair_count += int(relation_repair_count)
+        rounds.append(
+            {
+                "iteration": int(iteration),
+                "relation_repair_count": int(relation_repair_count),
+                "applied_root_count": int(applied_root_count),
+                "max_gap_before": float(max_gap_before),
+            }
+        )
     return {
         "enabled": True,
         "repair_count": int(repair_count),
         "shifted_node_count": int(len(shift_totals)),
+        "iteration_count": int(len(rounds)),
+        "max_iterations": int(max_iterations),
+        "damping": float(damping),
+        "max_gap": float(max_gap),
+        "target_gap": float(gap),
+        "rounds": rounds,
         "shift_by_node": {key: [float(values[0]), float(values[1])] for key, values in shift_totals.items()},
     }
 
@@ -374,9 +440,26 @@ def main() -> None:
 
         relations = copy.deepcopy(list(graph.get("relations", []) or []))
         if bool(args.disable_adjacent_frame_repair):
-            adjacent_frame_repair = {"enabled": False, "repair_count": 0, "shifted_node_count": 0, "shift_by_node": {}}
+            adjacent_frame_repair = {
+                "enabled": False,
+                "repair_count": 0,
+                "shifted_node_count": 0,
+                "iteration_count": 0,
+                "max_iterations": int(args.adjacent_repair_iterations),
+                "damping": float(args.adjacent_repair_damping),
+                "max_gap": float(args.adjacent_repair_max_gap),
+                "target_gap": 0.0,
+                "rounds": [],
+                "shift_by_node": {},
+            }
         else:
-            adjacent_frame_repair = _repair_adjacent_true_shape_frames(output_nodes, relations)
+            adjacent_frame_repair = _repair_adjacent_true_shape_frames(
+                output_nodes,
+                relations,
+                max_gap=float(args.adjacent_repair_max_gap),
+                max_iterations=int(args.adjacent_repair_iterations),
+                damping=float(args.adjacent_repair_damping),
+            )
             shifts = adjacent_frame_repair.get("shift_by_node", {}) or {}
             if shifts:
                 frame_by_id = {str(node.get("id")): copy.deepcopy(node.get("frame", {}) or {}) for node in output_nodes}
@@ -441,7 +524,12 @@ def main() -> None:
         "final_scale_stats": _numeric_stats(scale_values),
         "error_histogram": dict(error_histogram),
         "scale_fit_mode": str(args.scale_fit_mode),
-        "adjacent_frame_repair": "disabled" if bool(args.disable_adjacent_frame_repair) else "enabled",
+        "adjacent_frame_repair": {
+            "enabled": not bool(args.disable_adjacent_frame_repair),
+            "max_iterations": int(args.adjacent_repair_iterations),
+            "damping": float(args.adjacent_repair_damping),
+            "max_gap": float(args.adjacent_repair_max_gap),
+        },
     }
     dump_json(args.output_root / "summary.json", summary)
     print(

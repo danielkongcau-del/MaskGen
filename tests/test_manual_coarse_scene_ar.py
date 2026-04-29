@@ -357,12 +357,37 @@ class ManualCoarseSceneARTest(unittest.TestCase):
             {"type": "inserted_in", "object": "insert_group_0", "container": "support_1"},
         ]
 
-        summary = _repair_adjacent_true_shape_frames(nodes, relations)
+        summary = _repair_adjacent_true_shape_frames(nodes, relations, max_iterations=1, damping=1.0)
 
         self.assertEqual(summary["repair_count"], 1)
         self.assertLessEqual(_bbox_gap(nodes[0]["coarse_bbox"], nodes[1]["coarse_bbox"]), 4.0)
         self.assertEqual(nodes[1]["frame"]["origin"], [15.0, 5.0])
         self.assertEqual(nodes[2]["coarse_bbox"], [13.0, 3.0, 17.0, 7.0])
+
+    def test_true_shape_adjacent_repair_iterates_until_gap_is_bounded(self) -> None:
+        nodes = [
+            {
+                "id": "support_0",
+                "role": "support_region",
+                "frame": {"origin": [5.0, 5.0], "scale": 10.0, "orientation": 0.0},
+                "coarse_bbox": [0.0, 0.0, 10.0, 10.0],
+                "true_shape_local_bbox": {"min_x": -0.5, "min_y": -0.5, "width": 1.0, "height": 1.0},
+            },
+            {
+                "id": "support_1",
+                "role": "support_region",
+                "frame": {"origin": [105.0, 5.0], "scale": 10.0, "orientation": 0.0},
+                "coarse_bbox": [100.0, 0.0, 110.0, 10.0],
+                "true_shape_local_bbox": {"min_x": -0.5, "min_y": -0.5, "width": 1.0, "height": 1.0},
+            },
+        ]
+        relations = [{"type": "adjacent_to", "faces": ["support_0", "support_1"]}]
+
+        summary = _repair_adjacent_true_shape_frames(nodes, relations)
+
+        self.assertGreater(summary["repair_count"], 1)
+        self.assertGreater(summary["iteration_count"], 1)
+        self.assertLessEqual(_bbox_gap(nodes[0]["coarse_bbox"], nodes[1]["coarse_bbox"]), 4.0)
 
     def test_build_rows_writes_summary_and_dataset_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
