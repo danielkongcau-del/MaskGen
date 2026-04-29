@@ -12,6 +12,7 @@ from partition_gen.manual_coarse_scene_ar import (
     decode_coarse_scene_tokens_to_target,
     encode_coarse_scene_target,
     parent_first_node_order,
+    solve_coarse_scene_layout_constraints,
     validate_coarse_scene_tokens,
 )
 from partition_gen.parse_graph_tokenizer import ParseGraphTokenizerConfig, build_token_vocabulary, int_token
@@ -288,6 +289,92 @@ class ManualCoarseSceneARTest(unittest.TestCase):
         self.assertLessEqual(_bbox_gap(support_0, support_1), 4.0)
         self.assertLessEqual(_bbox_gap(support_0, support_2), 4.0)
         self.assertLessEqual(sibling_overlap_ratio, 0.1)
+
+    def test_layout_constraint_solver_contains_inserted_subtree(self) -> None:
+        target = {
+            "format": "maskgen_generator_target_v1",
+            "target_type": "parse_graph",
+            "size": [256, 256],
+            "parse_graph": {
+                "nodes": [
+                    {
+                        "id": "support_0",
+                        "role": "support_region",
+                        "frame": {"origin": [50.0, 50.0], "scale": 100.0, "orientation": 0.0},
+                        "coarse_bbox": [0.0, 0.0, 100.0, 100.0],
+                    },
+                    {
+                        "id": "insert_group_0",
+                        "role": "insert_object_group",
+                        "frame": {"origin": [140.0, 20.0], "scale": 20.0, "orientation": 0.0},
+                        "coarse_bbox": [130.0, 10.0, 150.0, 30.0],
+                    },
+                    {
+                        "id": "insert_0",
+                        "role": "insert_object",
+                        "frame": {"origin": [140.0, 20.0], "scale": 10.0, "orientation": 0.0},
+                        "coarse_bbox": [135.0, 15.0, 145.0, 25.0],
+                    },
+                ],
+                "relations": [
+                    {"type": "inserted_in", "object": "insert_group_0", "container": "support_0"},
+                    {"type": "contains", "parent": "insert_group_0", "child": "insert_0"},
+                ],
+                "residuals": [],
+            },
+            "metadata": {},
+        }
+
+        solved = solve_coarse_scene_layout_constraints(target)
+        nodes = {node["id"]: node for node in solved["parse_graph"]["nodes"]}
+
+        self.assertEqual(solved["metadata"]["coarse_scene_layout_constraints"]["solver"], "coarse_layout_constraint_v1")
+        self.assertGreater(solved["metadata"]["coarse_scene_layout_constraints"]["changed_node_count"], 0)
+        self.assertGreaterEqual(
+            _bbox_area(_bbox_intersection(nodes["insert_0"]["coarse_bbox"], nodes["support_0"]["coarse_bbox"]))
+            / max(1e-6, _bbox_area(nodes["insert_0"]["coarse_bbox"])),
+            0.8,
+        )
+
+    def test_layout_constraint_solver_separates_same_parent_supports(self) -> None:
+        target = {
+            "format": "maskgen_generator_target_v1",
+            "target_type": "parse_graph",
+            "size": [256, 256],
+            "parse_graph": {
+                "nodes": [
+                    {
+                        "id": "support_0",
+                        "role": "support_region",
+                        "frame": {"origin": [50.0, 50.0], "scale": 100.0, "orientation": 0.0},
+                        "coarse_bbox": [0.0, 0.0, 100.0, 100.0],
+                    },
+                    {
+                        "id": "support_1",
+                        "role": "support_region",
+                        "frame": {"origin": [70.0, 50.0], "scale": 100.0, "orientation": 0.0},
+                        "coarse_bbox": [20.0, 0.0, 120.0, 100.0],
+                    },
+                ],
+                "relations": [],
+                "residuals": [],
+            },
+            "metadata": {},
+        }
+
+        solved = solve_coarse_scene_layout_constraints(target)
+        nodes = {node["id"]: node for node in solved["parse_graph"]["nodes"]}
+        overlap = _bbox_area(_bbox_intersection(nodes["support_0"]["coarse_bbox"], nodes["support_1"]["coarse_bbox"])) / max(
+            1e-6, min(_bbox_area(nodes["support_0"]["coarse_bbox"]), _bbox_area(nodes["support_1"]["coarse_bbox"]))
+        )
+
+        self.assertLessEqual(overlap, 0.1)
+
+    def test_decode_records_layout_constraint_solver_summary(self) -> None:
+        tokens = encode_coarse_scene_target(_topology_target(), _geometry_targets())
+        decoded = decode_coarse_scene_tokens_to_target(tokens)
+
+        self.assertEqual(decoded["metadata"]["coarse_scene_layout_constraints"]["solver"], "coarse_layout_constraint_v1")
 
     def test_validator_rejects_forward_anchor(self) -> None:
         tokens = encode_coarse_scene_target(_topology_target(), _geometry_targets())

@@ -37,6 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-true-shape-local-bbox-side", type=float, default=1e-6)
     parser.add_argument("--scale-fit-mode", type=str, default="cover", choices=["cover", "contain", "frame"])
     parser.add_argument("--disable-adjacent-frame-repair", action="store_true")
+    parser.add_argument("--enable-legacy-adjacent-frame-repair", action="store_true")
     parser.add_argument("--adjacent-repair-iterations", type=int, default=5)
     parser.add_argument("--adjacent-repair-damping", type=float, default=0.8)
     parser.add_argument("--adjacent-repair-max-gap", type=float, default=4.0)
@@ -553,6 +554,9 @@ def main() -> None:
         except Exception as exc:
             error_histogram[type(exc).__name__] += 1
             continue
+        layout_constraint_summary = copy.deepcopy(
+            ((target.get("metadata", {}) or {}).get("coarse_scene_layout_constraints", {}) or {})
+        )
         graph = target.get("parse_graph", {}) or {}
         output_nodes: list[dict] = []
         geometry_rows: list[dict] = []
@@ -638,7 +642,8 @@ def main() -> None:
             output_nodes.append(output_node)
 
         relations = copy.deepcopy(list(graph.get("relations", []) or []))
-        if bool(args.disable_adjacent_frame_repair):
+        run_legacy_adjacent_repair = bool(args.enable_legacy_adjacent_frame_repair) and not bool(args.disable_adjacent_frame_repair)
+        if not run_legacy_adjacent_repair:
             adjacent_frame_repair = {
                 "enabled": False,
                 "repair_count": 0,
@@ -650,6 +655,7 @@ def main() -> None:
                 "max_overlap_ratio": float(args.adjacent_repair_max_overlap_ratio),
                 "target_gap": 0.0,
                 "solver": "disabled",
+                "reason": "coarse_layout_constraint_solver",
                 "rounds": [],
                 "shift_by_node": {},
             }
@@ -692,6 +698,7 @@ def main() -> None:
                 "true_shape_quality_reasons": dict(sample_quality_reasons),
                 "geometry_rows": geometry_rows,
                 "scale_fit_mode": str(args.scale_fit_mode),
+                "coarse_scene_layout_constraints": layout_constraint_summary,
                 "adjacent_frame_repair": adjacent_frame_repair,
             },
         }
@@ -727,12 +734,16 @@ def main() -> None:
         "error_histogram": dict(error_histogram),
         "scale_fit_mode": str(args.scale_fit_mode),
         "adjacent_frame_repair": {
-            "enabled": not bool(args.disable_adjacent_frame_repair),
+            "enabled": bool(args.enable_legacy_adjacent_frame_repair) and not bool(args.disable_adjacent_frame_repair),
             "max_iterations": int(args.adjacent_repair_iterations),
             "damping": float(args.adjacent_repair_damping),
             "max_gap": float(args.adjacent_repair_max_gap),
             "max_overlap_ratio": float(args.adjacent_repair_max_overlap_ratio),
             "solver": "candidate_projection",
+        },
+        "coarse_scene_layout_constraints": {
+            "enabled": True,
+            "solver": "coarse_layout_constraint_v1",
         },
     }
     dump_json(args.output_root / "summary.json", summary)

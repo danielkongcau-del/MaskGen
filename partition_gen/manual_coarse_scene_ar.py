@@ -455,6 +455,63 @@ def _with_bbox(decoded: dict, bbox: Sequence[float], *, orientation: float | Non
     return output
 
 
+def _shift_bbox(bbox: Sequence[float], dx: float, dy: float) -> list[float]:
+    return [
+        float(bbox[0]) + float(dx),
+        float(bbox[1]) + float(dy),
+        float(bbox[2]) + float(dx),
+        float(bbox[3]) + float(dy),
+    ]
+
+
+def _transform_bbox_between(bbox: Sequence[float], source_bbox: Sequence[float], target_bbox: Sequence[float]) -> list[float]:
+    source = _bbox_metrics(source_bbox)
+    target = _bbox_metrics(target_bbox)
+    scale_x = target["width"] / max(EPS, source["width"])
+    scale_y = target["height"] / max(EPS, source["height"])
+    return [
+        float(target["min_x"] + (float(bbox[0]) - source["min_x"]) * scale_x),
+        float(target["min_y"] + (float(bbox[1]) - source["min_y"]) * scale_y),
+        float(target["min_x"] + (float(bbox[2]) - source["min_x"]) * scale_x),
+        float(target["min_y"] + (float(bbox[3]) - source["min_y"]) * scale_y),
+    ]
+
+
+def _bbox_center_in_bbox(child: Sequence[float], container: Sequence[float]) -> bool:
+    child_metrics = _bbox_metrics(child)
+    return bool(
+        float(container[0]) <= child_metrics["center_x"] <= float(container[2])
+        and float(container[1]) <= child_metrics["center_y"] <= float(container[3])
+    )
+
+
+def _bbox_containment_ratio(child: Sequence[float], container: Sequence[float]) -> float:
+    inter = _intersection_bbox(child, container)
+    if inter is None:
+        return 0.0
+    return float(_bbox_metrics(inter)["area"] / max(EPS, _bbox_metrics(child)["area"]))
+
+
+def _adjacent_overlap_span_ratio(left: Sequence[float], right: Sequence[float]) -> float:
+    left_metrics = _bbox_metrics(left)
+    right_metrics = _bbox_metrics(right)
+    horizontal = abs(left_metrics["center_x"] - right_metrics["center_x"]) >= abs(left_metrics["center_y"] - right_metrics["center_y"])
+    if horizontal:
+        span = max(0.0, min(left_metrics["max_y"], right_metrics["max_y"]) - max(left_metrics["min_y"], right_metrics["min_y"]))
+        denom = min(left_metrics["height"], right_metrics["height"])
+    else:
+        span = max(0.0, min(left_metrics["max_x"], right_metrics["max_x"]) - max(left_metrics["min_x"], right_metrics["min_x"]))
+        denom = min(left_metrics["width"], right_metrics["width"])
+    return float(span / max(EPS, denom))
+
+
+def _set_node_coarse_bbox(node: dict, bbox: Sequence[float]) -> None:
+    values = [float(value) for value in bbox]
+    orientation = float((node.get("frame", {}) or {}).get("orientation", 0.0))
+    node["coarse_bbox"] = values
+    node["frame"] = _frame_from_bbox(values, orientation=orientation)
+
+
 def _clamp_bbox_inside(bbox: Sequence[float], container_bbox: Sequence[float], *, padding: float = 0.0) -> list[float]:
     child = _bbox_metrics(bbox)
     container = _bbox_metrics(container_bbox)
@@ -620,6 +677,466 @@ def _repair_decoded_frame(
         )
         return _with_bbox(decoded, bbox, orientation=orientation)
     return decoded
+
+
+def _layout_relation_pairs(relations: Sequence[dict], relation_type: str) -> list[tuple[str, str]]:
+    output: list[tuple[str, str]] = []
+    for relation in relations:
+        if str(relation.get("type", "")) != relation_type:
+            continue
+        if relation_type == "adjacent_to":
+            faces = [str(value) for value in relation.get("faces", []) or []]
+            output.extend((left, right) for left, right in zip(faces, faces[1:]))
+        elif relation_type == "inserted_in":
+            obj = relation.get("object")
+            container = relation.get("container", relation.get("support"))
+            if obj is not None and container is not None:
+                output.append((str(obj), str(container)))
+        elif relation_type == "contains":
+            parent = relation.get("parent")
+            child = relation.get("child")
+            if parent is not None and child is not None:
+                output.append((str(child), str(parent)))
+    return output
+
+
+def _layout_children_and_parents(relations: Sequence[dict]) -> tuple[dict[str, list[str]], dict[str, str]]:
+    children: dict[str, list[str]] = defaultdict(list)
+    parent_by_child: dict[str, str] = {}
+
+    def add(parent: object, child: object) -> None:
+        if parent is None or child is None:
+            return
+        parent_id = str(parent)
+        child_id = str(child)
+        if not parent_id or not child_id or parent_id == child_id:
+            return
+        children[parent_id].append(child_id)
+        parent_by_child.setdefault(child_id, parent_id)
+
+    for relation in relations:
+        relation_type = str(relation.get("type", ""))
+        if relation_type == "contains":
+            add(relation.get("parent"), relation.get("child"))
+        elif relation_type == "inserted_in":
+            add(relation.get("container", relation.get("support")), relation.get("object"))
+        elif relation_type == "divides":
+            add(relation.get("target", relation.get("support")), relation.get("divider"))
+        elif relation_type == "adjacent_to":
+            faces = [str(value) for value in relation.get("faces", []) or []]
+            if len(faces) >= 2:
+                add(faces[0], faces[1])
+    return {key: list(dict.fromkeys(values)) for key, values in children.items()}, parent_by_child
+
+
+def _layout_subtree_node_ids(root_id: str, children: dict[str, list[str]]) -> set[str]:
+    output: set[str] = set()
+    stack = [str(root_id)]
+    while stack:
+        node_id = stack.pop()
+        if node_id in output:
+            continue
+        output.add(node_id)
+        stack.extend(children.get(node_id, []))
+    return output
+
+
+def _layout_contains_children(relations: Sequence[dict]) -> dict[str, list[str]]:
+    output: dict[str, list[str]] = defaultdict(list)
+    for relation in relations:
+        if str(relation.get("type", "")) == "contains" and relation.get("parent") is not None and relation.get("child") is not None:
+            output[str(relation["parent"])].append(str(relation["child"]))
+    return {key: list(dict.fromkeys(values)) for key, values in output.items()}
+
+
+def _layout_semantic_bbox(
+    node_id: str,
+    *,
+    node_by_id: dict[str, dict],
+    bboxes: dict[str, list[float]],
+    contains_children: dict[str, list[str]],
+) -> list[float] | None:
+    node = node_by_id.get(str(node_id), {})
+    if str(node.get("role", "")) == "insert_object_group":
+        child_boxes = [
+            box
+            for child_id in contains_children.get(str(node_id), [])
+            if (box := _layout_semantic_bbox(child_id, node_by_id=node_by_id, bboxes=bboxes, contains_children=contains_children)) is not None
+        ]
+        union = _union_bboxes(child_boxes)
+        if union is not None:
+            return union
+    return bboxes.get(str(node_id))
+
+
+def _layout_sync_group_bboxes(
+    nodes: Sequence[dict],
+    bboxes: dict[str, list[float]],
+    contains_children: dict[str, list[str]],
+) -> dict[str, list[float]]:
+    output = {key: [float(value) for value in bbox] for key, bbox in bboxes.items()}
+    changed = True
+    while changed:
+        changed = False
+        for node in nodes:
+            node_id = str(node.get("id", ""))
+            if str(node.get("role", "")) != "insert_object_group":
+                continue
+            child_boxes = [output[child_id] for child_id in contains_children.get(node_id, []) if child_id in output]
+            union = _union_bboxes(child_boxes)
+            if union is not None and output.get(node_id) != union:
+                output[node_id] = [float(value) for value in union]
+                changed = True
+    return output
+
+
+def _layout_apply_transform_to_bboxes(
+    bboxes: dict[str, list[float]],
+    moved_ids: set[str],
+    source_bbox: Sequence[float],
+    target_bbox: Sequence[float],
+) -> dict[str, list[float]]:
+    output = {key: [float(value) for value in bbox] for key, bbox in bboxes.items()}
+    for node_id in moved_ids:
+        if node_id in output:
+            output[node_id] = _transform_bbox_between(output[node_id], source_bbox, target_bbox)
+    return output
+
+
+def _layout_same_parent_support_pairs(nodes: Sequence[dict], parent_by_child: dict[str, str]) -> list[tuple[str, str]]:
+    support_by_parent: dict[str, list[str]] = defaultdict(list)
+    for node in nodes:
+        node_id = str(node.get("id", ""))
+        if str(node.get("role", "")) in {"support_region", "residual_region"}:
+            support_by_parent[parent_by_child.get(node_id, "__root__")].append(node_id)
+    pairs: list[tuple[str, str]] = []
+    for values in support_by_parent.values():
+        ordered = list(dict.fromkeys(values))
+        for index, left_id in enumerate(ordered):
+            for right_id in ordered[index + 1 :]:
+                pairs.append((left_id, right_id))
+    return pairs
+
+
+def _layout_candidate_adjacent_bboxes(
+    child_bbox: Sequence[float],
+    anchor_bbox: Sequence[float],
+    *,
+    child_reference_bbox: Sequence[float] | None = None,
+    anchor_reference_bbox: Sequence[float] | None = None,
+    target_gap: float = 0.0,
+) -> list[list[float]]:
+    child = _bbox_metrics(child_bbox)
+    anchor = _bbox_metrics(anchor_bbox)
+    side = _adjacent_side(child_reference_bbox or child_bbox, anchor_reference_bbox or anchor_bbox)
+    width = max(1.0, child["width"])
+    height = max(1.0, child["height"])
+
+    def cross_centers(axis: str) -> list[float]:
+        if axis == "y":
+            span = min(height, anchor["height"])
+            low = anchor["min_y"] + span / 2.0
+            high = anchor["max_y"] - span / 2.0
+            decoded = child["center_y"]
+        else:
+            span = min(width, anchor["width"])
+            low = anchor["min_x"] + span / 2.0
+            high = anchor["max_x"] - span / 2.0
+            decoded = child["center_x"]
+        if high < low:
+            low = high = (low + high) / 2.0
+        values = [
+            _clamp(decoded, low, high),
+            (low + high) / 2.0,
+            low,
+            high,
+            low + (high - low) * 0.25,
+            low + (high - low) * 0.75,
+        ]
+        return list(dict.fromkeys(float(value) for value in values))
+
+    def make_candidate(candidate_side: int, cross_center: float) -> list[float]:
+        gap = max(0.0, float(target_gap))
+        if candidate_side == 0:
+            return _bbox_from_center_size(anchor["max_x"] + gap + width / 2.0, cross_center, width, height)
+        if candidate_side == 1:
+            return _bbox_from_center_size(anchor["min_x"] - gap - width / 2.0, cross_center, width, height)
+        if candidate_side == 2:
+            return _bbox_from_center_size(cross_center, anchor["max_y"] + gap + height / 2.0, width, height)
+        return _bbox_from_center_size(cross_center, anchor["min_y"] - gap - height / 2.0, width, height)
+
+    side_order = [side, *[candidate for candidate in (0, 1, 2, 3) if candidate != side]]
+    candidates: list[list[float]] = []
+    for candidate_side in side_order:
+        axis = "y" if candidate_side in {0, 1} else "x"
+        for center in cross_centers(axis):
+            candidates.append(make_candidate(candidate_side, center))
+    return [[float(value) for value in candidate] for candidate in candidates]
+
+
+def _layout_constraint_score(
+    nodes: Sequence[dict],
+    relations: Sequence[dict],
+    bboxes: dict[str, list[float]],
+    *,
+    max_adjacent_gap: float,
+    max_adjacent_overlap_ratio: float,
+    min_adjacent_overlap_span_ratio: float,
+    min_containment_ratio: float,
+    same_parent_max_overlap_ratio: float,
+) -> tuple[int, float]:
+    node_by_id = {str(node.get("id")): node for node in nodes if node.get("id") is not None}
+    contains_children = _layout_contains_children(relations)
+    synced_bboxes = _layout_sync_group_bboxes(nodes, bboxes, contains_children)
+    failure_count = 0
+    penalty = 0.0
+
+    for child_id, parent_id in [*_layout_relation_pairs(relations, "contains"), *_layout_relation_pairs(relations, "inserted_in")]:
+        child_bbox = _layout_semantic_bbox(child_id, node_by_id=node_by_id, bboxes=synced_bboxes, contains_children=contains_children)
+        parent_bbox = _layout_semantic_bbox(parent_id, node_by_id=node_by_id, bboxes=synced_bboxes, contains_children=contains_children)
+        if child_bbox is None or parent_bbox is None:
+            failure_count += 1
+            penalty += 1000.0
+            continue
+        containment = _bbox_containment_ratio(child_bbox, parent_bbox)
+        center_ok = _bbox_center_in_bbox(child_bbox, parent_bbox)
+        miss = max(0.0, float(min_containment_ratio) - containment)
+        if miss > 0.0 or not center_ok:
+            failure_count += 1
+            penalty += miss * 100.0 + (25.0 if not center_ok else 0.0)
+
+    for left_id, right_id in _layout_relation_pairs(relations, "adjacent_to"):
+        left_bbox = synced_bboxes.get(left_id)
+        right_bbox = synced_bboxes.get(right_id)
+        if left_bbox is None or right_bbox is None:
+            failure_count += 1
+            penalty += 1000.0
+            continue
+        gap = _bbox_gap(left_bbox, right_bbox)
+        overlap = _bbox_overlap_ratio(left_bbox, right_bbox)
+        span = _adjacent_overlap_span_ratio(left_bbox, right_bbox)
+        gap_miss = max(0.0, gap - float(max_adjacent_gap))
+        overlap_miss = max(0.0, overlap - float(max_adjacent_overlap_ratio))
+        span_miss = max(0.0, float(min_adjacent_overlap_span_ratio) - span)
+        if gap_miss > 0.0 or overlap_miss > 0.0 or span_miss > 0.0:
+            failure_count += 1
+            penalty += gap_miss + overlap_miss * 100.0 + span_miss * 20.0
+
+    _children, parent_by_child = _layout_children_and_parents(relations)
+    adjacent_pairs = {tuple(sorted(pair)) for pair in _layout_relation_pairs(relations, "adjacent_to")}
+    for left_id, right_id in _layout_same_parent_support_pairs(nodes, parent_by_child):
+        left_bbox = synced_bboxes.get(left_id)
+        right_bbox = synced_bboxes.get(right_id)
+        if left_bbox is None or right_bbox is None:
+            continue
+        allowed = max_adjacent_overlap_ratio if tuple(sorted((left_id, right_id))) in adjacent_pairs else same_parent_max_overlap_ratio
+        overlap_miss = max(0.0, _bbox_overlap_ratio(left_bbox, right_bbox) - float(allowed))
+        if overlap_miss > 0.0:
+            failure_count += 1
+            penalty += overlap_miss * 100.0
+
+    for node_id, bbox in synced_bboxes.items():
+        original = node_by_id.get(node_id, {}).get("coarse_layout", {}).get("decoded_bbox")
+        if isinstance(original, list) and len(original) == 4:
+            penalty += _bbox_gap(bbox, original) * 0.001
+
+    return int(failure_count), float(penalty)
+
+
+def _layout_candidate_maps(
+    nodes: Sequence[dict],
+    relations: Sequence[dict],
+    bboxes: dict[str, list[float]],
+    *,
+    children: dict[str, list[str]],
+    max_adjacent_gap: float,
+    max_adjacent_overlap_ratio: float,
+    min_adjacent_overlap_span_ratio: float,
+    min_containment_ratio: float,
+    same_parent_max_overlap_ratio: float,
+) -> list[tuple[str, dict[str, list[float]]]]:
+    node_by_id = {str(node.get("id")): node for node in nodes if node.get("id") is not None}
+    contains_children = _layout_contains_children(relations)
+    synced_bboxes = _layout_sync_group_bboxes(nodes, bboxes, contains_children)
+    candidates: list[tuple[str, dict[str, list[float]]]] = []
+
+    for child_id, parent_id in [*_layout_relation_pairs(relations, "inserted_in"), *_layout_relation_pairs(relations, "contains")]:
+        child_bbox = _layout_semantic_bbox(child_id, node_by_id=node_by_id, bboxes=synced_bboxes, contains_children=contains_children)
+        parent_bbox = _layout_semantic_bbox(parent_id, node_by_id=node_by_id, bboxes=synced_bboxes, contains_children=contains_children)
+        if child_bbox is None or parent_bbox is None:
+            continue
+        containment = _bbox_containment_ratio(child_bbox, parent_bbox)
+        if containment >= float(min_containment_ratio) and _bbox_center_in_bbox(child_bbox, parent_bbox):
+            continue
+        target_bbox = _clamp_bbox_inside(child_bbox, parent_bbox, padding=0.0)
+        moved_ids = _layout_subtree_node_ids(child_id, children)
+        candidates.append((f"contain:{child_id}->{parent_id}", _layout_apply_transform_to_bboxes(synced_bboxes, moved_ids, child_bbox, target_bbox)))
+
+    for anchor_id, child_id in _layout_relation_pairs(relations, "adjacent_to"):
+        anchor_bbox = synced_bboxes.get(anchor_id)
+        child_bbox = synced_bboxes.get(child_id)
+        if anchor_bbox is None or child_bbox is None:
+            continue
+        gap = _bbox_gap(anchor_bbox, child_bbox)
+        overlap = _bbox_overlap_ratio(anchor_bbox, child_bbox)
+        span = _adjacent_overlap_span_ratio(anchor_bbox, child_bbox)
+        if gap <= float(max_adjacent_gap) and overlap <= float(max_adjacent_overlap_ratio) and span >= float(min_adjacent_overlap_span_ratio):
+            continue
+        moved_ids = _layout_subtree_node_ids(child_id, children)
+        for target_bbox in _layout_candidate_adjacent_bboxes(child_bbox, anchor_bbox, target_gap=0.0):
+            candidates.append((f"adjacent:{child_id}->{anchor_id}", _layout_apply_transform_to_bboxes(synced_bboxes, moved_ids, child_bbox, target_bbox)))
+
+    _children, parent_by_child = _layout_children_and_parents(relations)
+    adjacent_pairs = {tuple(sorted(pair)) for pair in _layout_relation_pairs(relations, "adjacent_to")}
+    for left_id, right_id in _layout_same_parent_support_pairs(nodes, parent_by_child):
+        left_bbox = synced_bboxes.get(left_id)
+        right_bbox = synced_bboxes.get(right_id)
+        if left_bbox is None or right_bbox is None:
+            continue
+        allowed = max_adjacent_overlap_ratio if tuple(sorted((left_id, right_id))) in adjacent_pairs else same_parent_max_overlap_ratio
+        if _bbox_overlap_ratio(left_bbox, right_bbox) <= float(allowed):
+            continue
+        moved_ids = _layout_subtree_node_ids(right_id, children)
+        for target_bbox in _layout_candidate_adjacent_bboxes(right_bbox, left_bbox, target_gap=max_adjacent_gap):
+            candidates.append((f"separate:{right_id}->{left_id}", _layout_apply_transform_to_bboxes(synced_bboxes, moved_ids, right_bbox, target_bbox)))
+
+    return candidates
+
+
+def solve_coarse_scene_layout_constraints(
+    target: dict,
+    *,
+    max_iterations: int = 64,
+    max_adjacent_gap: float = 4.0,
+    max_adjacent_overlap_ratio: float = 0.1,
+    min_adjacent_overlap_span_ratio: float = 0.2,
+    min_containment_ratio: float = 0.8,
+    same_parent_max_overlap_ratio: float = 0.1,
+    in_place: bool = False,
+) -> dict:
+    output = target if in_place else copy.deepcopy(target)
+    graph = output.get("parse_graph", {}) or {}
+    nodes = list(graph.get("nodes", []) or [])
+    relations = list(graph.get("relations", []) or [])
+    node_by_id = {str(node.get("id")): node for node in nodes if node.get("id") is not None}
+    bboxes = {
+        node_id: [float(value) for value in node.get("coarse_bbox")]
+        for node_id, node in node_by_id.items()
+        if isinstance(node.get("coarse_bbox"), list) and len(node.get("coarse_bbox")) == 4
+    }
+    for node_id, node in node_by_id.items():
+        if isinstance(node.get("coarse_layout"), dict) and node_id in bboxes:
+            node["coarse_layout"].setdefault("decoded_bbox", copy.deepcopy(bboxes[node_id]))
+
+    children, _parent_by_child = _layout_children_and_parents(relations)
+    contains_children = _layout_contains_children(relations)
+    bboxes = _layout_sync_group_bboxes(nodes, bboxes, contains_children)
+    base_score = _layout_constraint_score(
+        nodes,
+        relations,
+        bboxes,
+        max_adjacent_gap=max_adjacent_gap,
+        max_adjacent_overlap_ratio=max_adjacent_overlap_ratio,
+        min_adjacent_overlap_span_ratio=min_adjacent_overlap_span_ratio,
+        min_containment_ratio=min_containment_ratio,
+        same_parent_max_overlap_ratio=same_parent_max_overlap_ratio,
+    )
+    initial_score = base_score
+    rounds: list[dict] = []
+    operation_histogram: Counter[str] = Counter()
+    max_iterations = max(0, int(max_iterations))
+
+    for iteration in range(max_iterations):
+        candidates = _layout_candidate_maps(
+            nodes,
+            relations,
+            bboxes,
+            children=children,
+            max_adjacent_gap=max_adjacent_gap,
+            max_adjacent_overlap_ratio=max_adjacent_overlap_ratio,
+            min_adjacent_overlap_span_ratio=min_adjacent_overlap_span_ratio,
+            min_containment_ratio=min_containment_ratio,
+            same_parent_max_overlap_ratio=same_parent_max_overlap_ratio,
+        )
+        if not candidates:
+            rounds.append({"iteration": int(iteration), "candidate_count": 0, "accepted": False, "score": list(base_score)})
+            break
+        best_label: str | None = None
+        best_bboxes: dict[str, list[float]] | None = None
+        best_score = base_score
+        for label, candidate_bboxes in candidates:
+            candidate_score = _layout_constraint_score(
+                nodes,
+                relations,
+                candidate_bboxes,
+                max_adjacent_gap=max_adjacent_gap,
+                max_adjacent_overlap_ratio=max_adjacent_overlap_ratio,
+                min_adjacent_overlap_span_ratio=min_adjacent_overlap_span_ratio,
+                min_containment_ratio=min_containment_ratio,
+                same_parent_max_overlap_ratio=same_parent_max_overlap_ratio,
+            )
+            if candidate_score < best_score:
+                best_score = candidate_score
+                best_label = label
+                best_bboxes = candidate_bboxes
+        if best_bboxes is None or best_label is None:
+            rounds.append(
+                {
+                    "iteration": int(iteration),
+                    "candidate_count": int(len(candidates)),
+                    "accepted": False,
+                    "score": list(base_score),
+                }
+            )
+            break
+        rounds.append(
+            {
+                "iteration": int(iteration),
+                "candidate_count": int(len(candidates)),
+                "accepted": True,
+                "operation": best_label,
+                "score_before": list(base_score),
+                "score_after": list(best_score),
+            }
+        )
+        operation_histogram[best_label.split(":", 1)[0]] += 1
+        bboxes = best_bboxes
+        base_score = best_score
+        if best_score[0] == 0:
+            break
+
+    final_bboxes = _layout_sync_group_bboxes(nodes, bboxes, contains_children)
+    changed_node_ids: list[str] = []
+    for node_id, bbox in final_bboxes.items():
+        node = node_by_id.get(node_id)
+        if node is None:
+            continue
+        old_bbox = node.get("coarse_bbox")
+        new_bbox = [float(value) for value in bbox]
+        if not isinstance(old_bbox, list) or len(old_bbox) != 4 or any(abs(float(left) - float(right)) > 1e-6 for left, right in zip(old_bbox, new_bbox)):
+            changed_node_ids.append(node_id)
+        _set_node_coarse_bbox(node, new_bbox)
+
+    summary = {
+        "enabled": True,
+        "solver": "coarse_layout_constraint_v1",
+        "iteration_count": int(len(rounds)),
+        "changed_node_count": int(len(changed_node_ids)),
+        "changed_node_ids": changed_node_ids,
+        "initial_failure_count": int(initial_score[0]),
+        "final_failure_count": int(base_score[0]),
+        "final_penalty": float(base_score[1]),
+        "operation_histogram": dict(operation_histogram),
+        "max_iterations": int(max_iterations),
+        "max_adjacent_gap": float(max_adjacent_gap),
+        "max_adjacent_overlap_ratio": float(max_adjacent_overlap_ratio),
+        "min_adjacent_overlap_span_ratio": float(min_adjacent_overlap_span_ratio),
+        "min_containment_ratio": float(min_containment_ratio),
+        "same_parent_max_overlap_ratio": float(same_parent_max_overlap_ratio),
+        "rounds": rounds,
+    }
+    output.setdefault("metadata", {})["coarse_scene_layout_constraints"] = summary
+    return output
 
 
 def _primary_relation_node_id(
@@ -961,6 +1478,7 @@ def decode_coarse_scene_tokens_to_target(
     tokens: Sequence[str],
     *,
     config: ParseGraphTokenizerConfig | None = None,
+    solve_layout_constraints: bool = True,
 ) -> dict:
     config = config or ParseGraphTokenizerConfig()
     tokens = [str(token) for token in tokens]
@@ -1072,6 +1590,7 @@ def decode_coarse_scene_tokens_to_target(
                 "relation_anchor_indices": list(relation_anchor_indices),
                 "relation_anchor_node_ids": list(relation_anchor_node_ids),
                 "relation_token": relation_token,
+                "decoded_bbox": [float(value) for value in decoded["bbox"]],
                 **decoded.get("coarse", {}),
                 **relation_extra,
             },
@@ -1110,7 +1629,7 @@ def decode_coarse_scene_tokens_to_target(
         raise ValueError(f"Trailing tokens after EOS: {len(tokens) - reader.index}")
     for index, children in group_children.items():
         nodes[index]["children"] = list(dict.fromkeys([*nodes[index].get("children", []), *children]))
-    return {
+    target = {
         "format": "maskgen_generator_target_v1",
         "target_type": "parse_graph",
         "size": size,
@@ -1120,10 +1639,18 @@ def decode_coarse_scene_tokens_to_target(
             "coarse_scene_diagnostics": diagnostics,
         },
     }
+    if bool(solve_layout_constraints):
+        target = solve_coarse_scene_layout_constraints(target, in_place=True)
+    return target
 
 
-def coarse_scene_target_to_parse_graph(tokens: Sequence[str], *, config: ParseGraphTokenizerConfig | None = None) -> dict:
-    return decode_coarse_scene_tokens_to_target(tokens, config=config)
+def coarse_scene_target_to_parse_graph(
+    tokens: Sequence[str],
+    *,
+    config: ParseGraphTokenizerConfig | None = None,
+    solve_layout_constraints: bool = True,
+) -> dict:
+    return decode_coarse_scene_tokens_to_target(tokens, config=config, solve_layout_constraints=solve_layout_constraints)
 
 
 def validate_coarse_scene_tokens(
