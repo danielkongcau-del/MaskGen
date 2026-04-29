@@ -423,6 +423,21 @@ def _bbox_gap(left: Sequence[float], right: Sequence[float]) -> float:
     return float(math.hypot(dx, dy))
 
 
+def _bbox_overlap_ratio(left: Sequence[float], right: Sequence[float]) -> float:
+    inter = _intersection_bbox(left, right)
+    if inter is None:
+        return 0.0
+    return float(_bbox_metrics(inter)["area"] / max(EPS, min(_bbox_metrics(left)["area"], _bbox_metrics(right)["area"])))
+
+
+def _bbox_canvas_overflow(bbox: Sequence[float], bounds: Sequence[float]) -> float:
+    min_x, min_y, max_x, max_y = [float(value) for value in bbox]
+    bmin_x, bmin_y, bmax_x, bmax_y = [float(value) for value in bounds]
+    overflow = max(0.0, bmin_x - min_x) + max(0.0, bmin_y - min_y) + max(0.0, max_x - bmax_x) + max(0.0, max_y - bmax_y)
+    scale = max(EPS, max(bmax_x - bmin_x, bmax_y - bmin_y))
+    return float(overflow / scale)
+
+
 def _frame_from_bbox(bbox: Sequence[float], *, orientation: float) -> dict:
     metrics = _bbox_metrics(bbox)
     return {
@@ -468,21 +483,72 @@ def _adjacent_bbox_from_anchor(
     side_bucket: int,
     gap_bucket: int,
     config: ParseGraphTokenizerConfig,
+    existing_bboxes: Sequence[Sequence[float]] | None = None,
+    canvas_bounds: Sequence[float] | None = None,
 ) -> list[float]:
     child = _bbox_metrics(bbox)
     anchor = _bbox_metrics(anchor_bbox)
     width = max(1.0, child["width"])
     height = max(1.0, child["height"])
+    if canvas_bounds is not None:
+        canvas = _bbox_metrics(canvas_bounds)
+        width = min(width, canvas["width"])
+        height = min(height, canvas["height"])
     side = max(0, min(int(side_bucket), 3))
     decoded_gap = dequantize(int(gap_bucket), low=0.0, high=1.0, bins=config.coarse_relation_bins)
     gap = min(4.0, decoded_gap * max(anchor["width"], anchor["height"]))
-    if side in {0, 1}:
-        center_y = _clamp(child["center_y"], anchor["min_y"] + height / 2.0, anchor["max_y"] - height / 2.0)
-        center_x = anchor["max_x"] + gap + width / 2.0 if side == 0 else anchor["min_x"] - gap - width / 2.0
-    else:
-        center_x = _clamp(child["center_x"], anchor["min_x"] + width / 2.0, anchor["max_x"] - width / 2.0)
-        center_y = anchor["max_y"] + gap + height / 2.0 if side == 2 else anchor["min_y"] - gap - height / 2.0
-    return _bbox_from_center_size(center_x, center_y, width, height)
+    peer_bboxes = [list(value) for value in existing_bboxes or [] if value is not None]
+
+    def cross_centers(axis: str) -> list[float]:
+        if axis == "y":
+            span = min(height, anchor["height"])
+            low = anchor["min_y"] + span / 2.0
+            high = anchor["max_y"] - span / 2.0
+            decoded = child["center_y"]
+        else:
+            span = min(width, anchor["width"])
+            low = anchor["min_x"] + span / 2.0
+            high = anchor["max_x"] - span / 2.0
+            decoded = child["center_x"]
+        if high < low:
+            high = low
+        centers = [
+            _clamp(decoded, low, high),
+            (low + high) / 2.0,
+            low,
+            high,
+            low + (high - low) * 0.25,
+            low + (high - low) * 0.75,
+        ]
+        return list(dict.fromkeys(float(value) for value in centers))
+
+    def make_candidate(candidate_side: int, cross_center: float) -> list[float]:
+        if candidate_side == 0:
+            return _bbox_from_center_size(anchor["max_x"] + gap + width / 2.0, cross_center, width, height)
+        if candidate_side == 1:
+            return _bbox_from_center_size(anchor["min_x"] - gap - width / 2.0, cross_center, width, height)
+        if candidate_side == 2:
+            return _bbox_from_center_size(cross_center, anchor["max_y"] + gap + height / 2.0, width, height)
+        return _bbox_from_center_size(cross_center, anchor["min_y"] - gap - height / 2.0, width, height)
+
+    side_order = [side, *[candidate for candidate in (0, 1, 2, 3) if candidate != side]]
+    candidates: list[tuple[int, list[float]]] = []
+    for candidate_side in side_order:
+        axis = "y" if candidate_side in {0, 1} else "x"
+        for center in cross_centers(axis):
+            candidates.append((candidate_side, make_candidate(candidate_side, center)))
+
+    def score(candidate: tuple[int, list[float]]) -> tuple[float, float, float, int, float]:
+        candidate_side, candidate_bbox = candidate
+        anchor_overlap = _bbox_overlap_ratio(candidate_bbox, anchor_bbox)
+        relation_gap = _bbox_gap(candidate_bbox, anchor_bbox)
+        peer_overlap = max((_bbox_overlap_ratio(candidate_bbox, peer) for peer in peer_bboxes), default=0.0)
+        overflow = 0.0 if canvas_bounds is None else _bbox_canvas_overflow(candidate_bbox, canvas_bounds)
+        relation_penalty = max(0.0, relation_gap - 4.0) + max(0.0, anchor_overlap - 0.1) * 10.0
+        peer_penalty = max(0.0, peer_overlap - 0.1) * 10.0
+        return (relation_penalty, peer_penalty, overflow, 0 if candidate_side == side else 1, peer_overlap)
+
+    return [float(value) for value in min(candidates, key=score)[1]]
 
 
 def _divider_bbox_from_anchor(
@@ -517,6 +583,7 @@ def _repair_decoded_frame(
     relation_extra: dict,
     config: ParseGraphTokenizerConfig,
     canvas_bounds: Sequence[float] | None = None,
+    existing_nodes: Sequence[dict] | None = None,
 ) -> dict:
     orientation = float(decoded.get("frame", {}).get("orientation", 0.0))
     if action_token == "ACTION_SUPPORT" and canvas_bounds is not None:
@@ -528,12 +595,19 @@ def _repair_decoded_frame(
         padding = 0.02 * min(anchor["width"], anchor["height"])
         return _with_bbox(decoded, _clamp_bbox_inside(decoded["bbox"], anchor_bbox, padding=padding), orientation=orientation)
     if action_token == "ACTION_ADJACENT_SUPPORT":
+        peer_bboxes = [
+            node["coarse_bbox"]
+            for node in existing_nodes or []
+            if str(node.get("role", "")) in {"support_region", "residual_region"} and node.get("coarse_bbox") is not None
+        ]
         bbox = _adjacent_bbox_from_anchor(
             decoded["bbox"],
             anchor_bbox,
             side_bucket=int(relation_extra.get("side_bucket", 0)),
             gap_bucket=int(relation_extra.get("gap_bucket", 0)),
             config=config,
+            existing_bboxes=peer_bboxes,
+            canvas_bounds=canvas_bounds,
         )
         return _with_bbox(decoded, bbox, orientation=orientation)
     if action_token == "ACTION_DIVIDER":
@@ -977,6 +1051,8 @@ def decode_coarse_scene_tokens_to_target(
                 anchor_bbox=anchor_bbox,
                 relation_extra=relation_extra,
                 config=config,
+                canvas_bounds=[0.0, 0.0, float(size[0]), float(size[1])],
+                existing_nodes=nodes,
             )
         reader.expect("END_ACTION")
         node_id = _new_node_id(role, counters)

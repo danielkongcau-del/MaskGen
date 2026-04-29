@@ -15,7 +15,7 @@ from partition_gen.manual_coarse_scene_ar import (
     validate_coarse_scene_tokens,
 )
 from partition_gen.parse_graph_tokenizer import ParseGraphTokenizerConfig, build_token_vocabulary, int_token
-from scripts.attach_coarse_scene_true_shape_to_samples import _fit_frame_to_shape_bbox
+from scripts.attach_coarse_scene_true_shape_to_samples import _fit_frame_to_shape_bbox, _repair_adjacent_true_shape_frames
 
 
 def _bbox_area(bbox: list[float] | None) -> float:
@@ -134,6 +134,56 @@ def _geometry_targets() -> list[dict]:
     ]
 
 
+def _two_adjacent_support_target() -> tuple[dict, list[dict]]:
+    target = {
+        "format": "maskgen_generator_target_v1",
+        "target_type": "manual_parse_graph_topology_v1",
+        "size": [256, 256],
+        "parse_graph": {
+            "nodes": [
+                {
+                    "id": "support_0",
+                    "role": "support_region",
+                    "label": 0,
+                    "renderable": True,
+                    "is_reference_only": False,
+                    "geometry_model": "polygon_code",
+                    "geometry_ref": "support_0",
+                },
+                {
+                    "id": "support_1",
+                    "role": "support_region",
+                    "label": 0,
+                    "renderable": True,
+                    "is_reference_only": False,
+                    "geometry_model": "polygon_code",
+                    "geometry_ref": "support_1",
+                },
+                {
+                    "id": "support_2",
+                    "role": "support_region",
+                    "label": 0,
+                    "renderable": True,
+                    "is_reference_only": False,
+                    "geometry_model": "polygon_code",
+                    "geometry_ref": "support_2",
+                },
+            ],
+            "relations": [
+                {"type": "adjacent_to", "faces": ["support_0", "support_1"]},
+                {"type": "adjacent_to", "faces": ["support_0", "support_2"]},
+            ],
+            "residuals": [],
+        },
+    }
+    geometry = [
+        _geometry_target("support_0", "support_region", 0, [128.0, 128.0], 96.0),
+        _geometry_target("support_1", "support_region", 0, [192.0, 128.0], 48.0),
+        _geometry_target("support_2", "support_region", 0, [192.0, 128.0], 48.0),
+    ]
+    return target, geometry
+
+
 def _write_split(tmpdir: str) -> Path:
     root = Path(tmpdir) / "split" / "train"
     topology_path = root / "topology" / "graphs" / "0.json"
@@ -223,6 +273,22 @@ class ManualCoarseSceneARTest(unittest.TestCase):
         self.assertGreaterEqual(divider_coverage, 0.3)
         self.assertLessEqual(_bbox_area(divider) / max(1e-6, _bbox_area(divide_target)), 1.25)
 
+    def test_adjacent_decode_avoids_existing_support_collision(self) -> None:
+        target, geometry = _two_adjacent_support_target()
+        tokens = encode_coarse_scene_target(target, geometry)
+        decoded = decode_coarse_scene_tokens_to_target(tokens)
+        nodes = {node["id"]: node for node in decoded["parse_graph"]["nodes"]}
+
+        support_0 = nodes["support_0"]["coarse_bbox"]
+        support_1 = nodes["support_1"]["coarse_bbox"]
+        support_2 = nodes["support_2"]["coarse_bbox"]
+        sibling_intersection = _bbox_intersection(support_1, support_2)
+        sibling_overlap_ratio = _bbox_area(sibling_intersection) / max(1e-6, min(_bbox_area(support_1), _bbox_area(support_2)))
+
+        self.assertLessEqual(_bbox_gap(support_0, support_1), 4.0)
+        self.assertLessEqual(_bbox_gap(support_0, support_2), 4.0)
+        self.assertLessEqual(sibling_overlap_ratio, 0.1)
+
     def test_validator_rejects_forward_anchor(self) -> None:
         tokens = encode_coarse_scene_target(_topology_target(), _geometry_targets())
         invalid = list(tokens)
@@ -262,6 +328,41 @@ class ManualCoarseSceneARTest(unittest.TestCase):
 
         self.assertEqual(fitted["scale"], 10.0)
         self.assertEqual(fitted["origin"], [10.0, 30.0])
+
+    def test_true_shape_adjacent_repair_shifts_child_subtree(self) -> None:
+        nodes = [
+            {
+                "id": "support_0",
+                "role": "support_region",
+                "frame": {"origin": [5.0, 5.0], "scale": 10.0, "orientation": 0.0},
+                "coarse_bbox": [0.0, 0.0, 10.0, 10.0],
+                "true_shape_local_bbox": {"min_x": -0.5, "min_y": -0.5, "width": 1.0, "height": 1.0},
+            },
+            {
+                "id": "support_1",
+                "role": "support_region",
+                "frame": {"origin": [105.0, 5.0], "scale": 10.0, "orientation": 0.0},
+                "coarse_bbox": [100.0, 0.0, 110.0, 10.0],
+                "true_shape_local_bbox": {"min_x": -0.5, "min_y": -0.5, "width": 1.0, "height": 1.0},
+            },
+            {
+                "id": "insert_group_0",
+                "role": "insert_object_group",
+                "frame": {"origin": [105.0, 5.0], "scale": 4.0, "orientation": 0.0},
+                "coarse_bbox": [103.0, 3.0, 107.0, 7.0],
+            },
+        ]
+        relations = [
+            {"type": "adjacent_to", "faces": ["support_0", "support_1"]},
+            {"type": "inserted_in", "object": "insert_group_0", "container": "support_1"},
+        ]
+
+        summary = _repair_adjacent_true_shape_frames(nodes, relations)
+
+        self.assertEqual(summary["repair_count"], 1)
+        self.assertLessEqual(_bbox_gap(nodes[0]["coarse_bbox"], nodes[1]["coarse_bbox"]), 4.0)
+        self.assertEqual(nodes[1]["frame"]["origin"], [15.0, 5.0])
+        self.assertEqual(nodes[2]["coarse_bbox"], [13.0, 3.0, 17.0, 7.0])
 
     def test_build_rows_writes_summary_and_dataset_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

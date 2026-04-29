@@ -36,6 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-true-shape-world-bbox-area", type=float, default=1.0)
     parser.add_argument("--min-true-shape-local-bbox-side", type=float, default=1e-6)
     parser.add_argument("--scale-fit-mode", type=str, default="cover", choices=["cover", "contain", "frame"])
+    parser.add_argument("--disable-adjacent-frame-repair", action="store_true")
     parser.add_argument("--progress-every", type=int, default=25)
     return parser.parse_args()
 
@@ -62,10 +63,176 @@ def _bbox_metrics(bbox: list[float]) -> dict:
     width = max(1e-6, float(bbox[2]) - float(bbox[0]))
     height = max(1e-6, float(bbox[3]) - float(bbox[1]))
     return {
+        "min_x": float(bbox[0]),
+        "min_y": float(bbox[1]),
+        "max_x": float(bbox[2]),
+        "max_y": float(bbox[3]),
         "width": float(width),
         "height": float(height),
         "center_x": float((float(bbox[0]) + float(bbox[2])) / 2.0),
         "center_y": float((float(bbox[1]) + float(bbox[3])) / 2.0),
+    }
+
+
+def _bbox_from_local_bbox(frame: dict, local_bbox: dict) -> list[float] | None:
+    width = abs(float(local_bbox.get("width", 0.0)))
+    height = abs(float(local_bbox.get("height", 0.0)))
+    if width <= 1e-6 or height <= 1e-6:
+        return None
+    min_x = float(local_bbox.get("min_x", -width / 2.0))
+    min_y = float(local_bbox.get("min_y", -height / 2.0))
+    corners = [
+        (min_x, min_y),
+        (min_x + width, min_y),
+        (min_x + width, min_y + height),
+        (min_x, min_y + height),
+    ]
+    origin = frame.get("origin", [0.0, 0.0]) or [0.0, 0.0]
+    origin_x, origin_y = float(origin[0]), float(origin[1])
+    scale = max(1e-6, float(frame.get("scale", 1.0)))
+    theta = float(frame.get("orientation", 0.0))
+    cos_theta = math.cos(theta)
+    sin_theta = math.sin(theta)
+    world: list[tuple[float, float]] = []
+    for local_x, local_y in corners:
+        x = float(local_x) * scale
+        y = float(local_y) * scale
+        world.append((origin_x + x * cos_theta - y * sin_theta, origin_y + x * sin_theta + y * cos_theta))
+    xs = [point[0] for point in world]
+    ys = [point[1] for point in world]
+    return [float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys))]
+
+
+def _node_repair_bbox(node: dict) -> list[float] | None:
+    local_bbox = node.get("true_shape_local_bbox")
+    if isinstance(local_bbox, dict):
+        bbox = _bbox_from_local_bbox(node.get("frame", {}) or {}, local_bbox)
+        if bbox is not None:
+            return bbox
+    coarse_bbox = node.get("coarse_bbox")
+    if isinstance(coarse_bbox, list) and len(coarse_bbox) == 4:
+        return [float(value) for value in coarse_bbox]
+    return None
+
+
+def _shift_node_layout(node: dict, dx: float, dy: float) -> None:
+    frame = copy.deepcopy(node.get("frame", {}) or {})
+    origin = frame.get("origin", [0.0, 0.0]) or [0.0, 0.0]
+    frame["origin"] = [float(origin[0]) + float(dx), float(origin[1]) + float(dy)]
+    node["frame"] = frame
+    coarse_bbox = node.get("coarse_bbox")
+    if isinstance(coarse_bbox, list) and len(coarse_bbox) == 4:
+        node["coarse_bbox"] = [
+            float(coarse_bbox[0]) + float(dx),
+            float(coarse_bbox[1]) + float(dy),
+            float(coarse_bbox[2]) + float(dx),
+            float(coarse_bbox[3]) + float(dy),
+        ]
+
+
+def _adjacent_side(child_bbox: list[float], anchor_bbox: list[float]) -> int:
+    child = _bbox_metrics(child_bbox)
+    anchor = _bbox_metrics(anchor_bbox)
+    dx = child["center_x"] - anchor["center_x"]
+    dy = child["center_y"] - anchor["center_y"]
+    if abs(dx) >= abs(dy):
+        return 0 if dx >= 0.0 else 1
+    return 2 if dy >= 0.0 else 3
+
+
+def _adjacent_repair_children(relations: list[dict]) -> dict[str, list[str]]:
+    children: dict[str, list[str]] = {}
+
+    def add(parent: object, child: object) -> None:
+        if parent is None or child is None:
+            return
+        parent_id = str(parent)
+        child_id = str(child)
+        if parent_id == child_id:
+            return
+        children.setdefault(parent_id, []).append(child_id)
+
+    for relation in relations:
+        relation_type = str(relation.get("type", ""))
+        if relation_type == "inserted_in":
+            add(relation.get("container", relation.get("support")), relation.get("object"))
+        elif relation_type == "contains":
+            add(relation.get("parent"), relation.get("child"))
+        elif relation_type == "divides":
+            add(relation.get("target", relation.get("support")), relation.get("divider"))
+        elif relation_type == "adjacent_to":
+            faces = [str(value) for value in relation.get("faces", []) or []]
+            if len(faces) >= 2:
+                add(faces[0], faces[1])
+    return {key: list(dict.fromkeys(values)) for key, values in children.items()}
+
+
+def _repair_adjacent_true_shape_frames(nodes: list[dict], relations: list[dict], *, gap: float = 0.0) -> dict:
+    node_by_id = {str(node.get("id")): node for node in nodes if node.get("id") is not None}
+    children = _adjacent_repair_children(relations)
+    shift_totals: dict[str, list[float]] = {}
+    repair_count = 0
+
+    def shift_subtree(root_id: str, dx: float, dy: float) -> None:
+        stack = [root_id]
+        visited: set[str] = set()
+        while stack:
+            node_id = stack.pop()
+            if node_id in visited:
+                continue
+            visited.add(node_id)
+            node = node_by_id.get(node_id)
+            if node is None:
+                continue
+            _shift_node_layout(node, dx, dy)
+            total = shift_totals.setdefault(node_id, [0.0, 0.0])
+            total[0] += float(dx)
+            total[1] += float(dy)
+            stack.extend(children.get(node_id, []))
+
+    for relation in relations:
+        if str(relation.get("type", "")) != "adjacent_to":
+            continue
+        faces = [str(value) for value in relation.get("faces", []) or []]
+        if len(faces) < 2:
+            continue
+        anchor_id, child_id = faces[0], faces[1]
+        anchor_node = node_by_id.get(anchor_id)
+        child_node = node_by_id.get(child_id)
+        if anchor_node is None or child_node is None:
+            continue
+        anchor_bbox = _node_repair_bbox(anchor_node)
+        child_bbox = _node_repair_bbox(child_node)
+        if anchor_bbox is None or child_bbox is None:
+            continue
+        anchor_coarse = anchor_node.get("coarse_bbox") if isinstance(anchor_node.get("coarse_bbox"), list) else anchor_bbox
+        child_coarse = child_node.get("coarse_bbox") if isinstance(child_node.get("coarse_bbox"), list) else child_bbox
+        side = _adjacent_side([float(value) for value in child_coarse], [float(value) for value in anchor_coarse])
+        anchor = _bbox_metrics(anchor_bbox)
+        child = _bbox_metrics(child_bbox)
+        dx = 0.0
+        dy = 0.0
+        if side == 0:
+            dx = anchor["max_x"] + float(gap) - child["min_x"]
+            dy = anchor["center_y"] - child["center_y"]
+        elif side == 1:
+            dx = anchor["min_x"] - float(gap) - child["max_x"]
+            dy = anchor["center_y"] - child["center_y"]
+        elif side == 2:
+            dx = anchor["center_x"] - child["center_x"]
+            dy = anchor["max_y"] + float(gap) - child["min_y"]
+        else:
+            dx = anchor["center_x"] - child["center_x"]
+            dy = anchor["min_y"] - float(gap) - child["max_y"]
+        if abs(dx) <= 1e-6 and abs(dy) <= 1e-6:
+            continue
+        shift_subtree(child_id, dx, dy)
+        repair_count += 1
+    return {
+        "enabled": True,
+        "repair_count": int(repair_count),
+        "shifted_node_count": int(len(shift_totals)),
+        "shift_by_node": {key: [float(values[0]), float(values[1])] for key, values in shift_totals.items()},
     }
 
 
@@ -205,13 +372,27 @@ def main() -> None:
                 geometry_rows.append(geometry_row)
             output_nodes.append(output_node)
 
+        relations = copy.deepcopy(list(graph.get("relations", []) or []))
+        if bool(args.disable_adjacent_frame_repair):
+            adjacent_frame_repair = {"enabled": False, "repair_count": 0, "shifted_node_count": 0, "shift_by_node": {}}
+        else:
+            adjacent_frame_repair = _repair_adjacent_true_shape_frames(output_nodes, relations)
+            shifts = adjacent_frame_repair.get("shift_by_node", {}) or {}
+            if shifts:
+                frame_by_id = {str(node.get("id")): copy.deepcopy(node.get("frame", {}) or {}) for node in output_nodes}
+                for geometry_row in geometry_rows:
+                    node_id = str(geometry_row.get("node_id", ""))
+                    if node_id in shifts:
+                        geometry_row["final_frame"] = copy.deepcopy(frame_by_id.get(node_id, geometry_row.get("final_frame", {})))
+                        geometry_row["adjacent_frame_repair_shift"] = copy.deepcopy(shifts[node_id])
+
         attached_target = {
             "format": "maskgen_generator_target_v1",
             "target_type": "parse_graph",
             "size": copy.deepcopy(target.get("size", [256, 256])),
             "parse_graph": {
                 "nodes": output_nodes,
-                "relations": copy.deepcopy(list(graph.get("relations", []) or [])),
+                "relations": relations,
                 "residuals": copy.deepcopy(list(graph.get("residuals", []) or [])),
             },
             "metadata": {
@@ -226,6 +407,7 @@ def main() -> None:
                 "true_shape_quality_reasons": dict(sample_quality_reasons),
                 "geometry_rows": geometry_rows,
                 "scale_fit_mode": str(args.scale_fit_mode),
+                "adjacent_frame_repair": adjacent_frame_repair,
             },
         }
         output_path = args.output_root / "graphs" / f"sample_{sample_index:06d}.json"
@@ -259,6 +441,7 @@ def main() -> None:
         "final_scale_stats": _numeric_stats(scale_values),
         "error_histogram": dict(error_histogram),
         "scale_fit_mode": str(args.scale_fit_mode),
+        "adjacent_frame_repair": "disabled" if bool(args.disable_adjacent_frame_repair) else "enabled",
     }
     dump_json(args.output_root / "summary.json", summary)
     print(
