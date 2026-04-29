@@ -380,6 +380,12 @@ Audits spatial placement of renderable polygon nodes in full manual `parse_graph
 
 It uses the same local-to-world transform as the visualization script, then reports whether polygon bboxes intersect the canvas, whether origins or bbox centers are near edges/corners, bbox size statistics, and origin/role/label histograms. This is useful for diagnosing geometry generators that are structurally valid but render mostly blank or collapsed into corners.
 
+### `scripts/inspect_manual_parse_graph_spatial_failures.py`
+
+Exports and summarizes the failed nodes behind a spatial audit.
+
+It loads full parse-graph targets, optionally reuses an existing `spatial_audit.json`, and writes one JSONL row per invisible/tiny polygon node with role/label, mapping mode, retrieval score, generated local bbox, frame clamp diagnostics, world bbox, and failure reasons. The Markdown summary groups failures by reason, role, role-label pair, mapping mode, and frame clamp mode so the remaining spatial failures can be traced to shape generation, scale, mapping, or topology issues.
+
 ### `scripts/visualize_manual_parse_graph_target.py`
 
 Renders full manual `parse_graph` targets to PNG.
