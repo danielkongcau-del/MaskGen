@@ -42,6 +42,19 @@ def _bbox_from_points(points: Sequence[Sequence[float]]) -> list[float] | None:
     return [float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys))]
 
 
+def _bbox_from_node_coarse_bbox(node: dict) -> list[float] | None:
+    bbox = node.get("coarse_bbox")
+    if not isinstance(bbox, list) or len(bbox) != 4:
+        return None
+    try:
+        values = [float(value) for value in bbox]
+    except (TypeError, ValueError):
+        return None
+    if values[2] <= values[0] or values[3] <= values[1]:
+        return None
+    return values
+
+
 def _flatten_polygon_points(rings: Iterable[tuple[list[list[float]], list[list[list[float]]]]]) -> list[list[float]]:
     points: list[list[float]] = []
     for outer, holes in rings:
@@ -115,6 +128,7 @@ def _node_world_bboxes(target: dict) -> dict[str, dict]:
         bbox = None
         if str(node.get("geometry_model", "none")) == "polygon_code":
             bbox = _bbox_from_points(_flatten_polygon_points(polygon_world_rings(node)))
+        coarse_bbox = _bbox_from_node_coarse_bbox(node)
         rows[node_id] = {
             "node_id": node_id,
             "role": str(node.get("role", "")),
@@ -122,6 +136,7 @@ def _node_world_bboxes(target: dict) -> dict[str, dict]:
             "geometry_model": str(node.get("geometry_model", "none")),
             "bbox": None if bbox is None else [float(value) for value in bbox],
             "bbox_source": "geometry" if bbox is not None else None,
+            "_coarse_bbox_candidate": coarse_bbox,
         }
 
     changed = True
@@ -138,6 +153,10 @@ def _node_world_bboxes(target: dict) -> dict[str, dict]:
                 changed = True
 
     for row in rows.values():
+        if row.get("bbox") is None and row.get("_coarse_bbox_candidate") is not None:
+            row["bbox"] = row["_coarse_bbox_candidate"]
+            row["bbox_source"] = "coarse_bbox"
+        row.pop("_coarse_bbox_candidate", None)
         bbox = row.get("bbox")
         row["bbox_area"] = float(_bbox_area(bbox))
         row["bbox_center"] = None if bbox is None else [float(value) for value in _bbox_center(bbox)]

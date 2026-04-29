@@ -63,6 +63,29 @@ class ManualParseGraphRelationSpatialAuditTest(unittest.TestCase):
         self.assertEqual(inserted["left_bbox_source"], "contains_children")
         self.assertTrue(inserted["left_center_in_right"])
 
+    def test_inserted_group_can_fallback_to_coarse_bbox(self) -> None:
+        target = _target(
+            [
+                _square_node("support_0", "support_region", 0, [128.0, 128.0], 120.0),
+                {
+                    "id": "insert_group_0",
+                    "role": "insert_object_group",
+                    "label": 1,
+                    "geometry_model": "none",
+                    "renderable": False,
+                    "coarse_bbox": [110.0, 110.0, 146.0, 146.0],
+                },
+            ],
+            [{"type": "inserted_in", "object": "insert_group_0", "container": "support_0"}],
+        )
+
+        audit = audit_manual_parse_graph_target_relation_spatial(target)
+        inserted = audit["relations"][0]
+
+        self.assertEqual(audit["failed_relation_pair_count"], 0)
+        self.assertEqual(inserted["left_bbox_source"], "coarse_bbox")
+        self.assertTrue(inserted["left_center_in_right"])
+
     def test_adjacent_large_overlap_fails(self) -> None:
         target = _target(
             [
