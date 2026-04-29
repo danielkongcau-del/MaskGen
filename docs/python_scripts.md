@@ -304,6 +304,12 @@ It decodes semantic-valid generated topology rows, retrieves a similar train lay
 
 Like the split-target variant, it retries local geometry samples whose generated bbox is degenerate, tiny after scaling, or fully outside the canvas, then falls back to a true local shape from the retrieval split when retries do not produce a usable shape. This keeps the layout experiment focused on frame quality while preventing a small number of collapsed local shapes from dominating the spatial audit.
 
+### `scripts/attach_retrieved_residual_layout_true_shape_to_topology_samples.py`
+
+Attaches residual-corrected retrieved-layout frames and true local shapes to generated topology samples.
+
+This is an ablation script for separating layout/topology quality from local geometry sampling quality. It decodes generated topology rows, retrieves the nearest train layout, maps train frames to generated nodes, applies the residual frame predictor, then attaches the matched retrieved true local shape when possible. Nodes that cannot be matched to the retrieved row fall back to the `(role, label, geometry_model)` true-shape library. The output root is compatible with the standard audit and visualization scripts.
+
 ### `scripts/train_manual_relative_layout_ar.py`
 
 Trains the relative layout AR generator.

@@ -215,6 +215,7 @@ def build_geometry_shape_fallback_library(
     by_exact = defaultdict(list)
     by_role_label = defaultdict(list)
     by_role = defaultdict(list)
+    by_source: dict[tuple[str, str], dict] = {}
     global_shapes: list[dict] = []
     skipped_missing = 0
     skipped_degenerate = 0
@@ -261,6 +262,7 @@ def build_geometry_shape_fallback_library(
             by_exact[_node_key(shape, level="exact")].append(shape)
             by_role_label[_node_key(shape, level="role_label")].append(shape)
             by_role[_node_key(shape, level="role")].append(shape)
+            by_source[(str(row.get("stem")), str(geometry_ref))] = shape
             global_shapes.append(shape)
 
     def sort_shapes(values: list[dict]) -> list[dict]:
@@ -270,6 +272,7 @@ def build_geometry_shape_fallback_library(
         "exact": {key: sort_shapes(values) for key, values in by_exact.items()},
         "role_label": {key: sort_shapes(values) for key, values in by_role_label.items()},
         "role": {key: sort_shapes(values) for key, values in by_role.items()},
+        "source": {key: copy.deepcopy(value) for key, value in by_source.items()},
         "global": sort_shapes(global_shapes),
     }
     summary = {

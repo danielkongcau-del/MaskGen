@@ -270,6 +270,7 @@ class ManualLayoutResidualTest(unittest.TestCase):
             )
 
             self.assertEqual(summary["shape_count"], 2)
+            self.assertIn(("train_a", "train_a_support"), library["source"])
             self.assertEqual(mode, "fallback_true_shape_exact")
             self.assertEqual(geometry["source_node_id"], "query_support")
             self.assertEqual(geometry["geometry"]["outer_local"][0], [-0.5, -0.5])
