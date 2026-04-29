@@ -423,6 +423,154 @@ def _bbox_gap(left: Sequence[float], right: Sequence[float]) -> float:
     return float(math.hypot(dx, dy))
 
 
+def _frame_from_bbox(bbox: Sequence[float], *, orientation: float) -> dict:
+    metrics = _bbox_metrics(bbox)
+    return {
+        "origin": [float(metrics["center_x"]), float(metrics["center_y"])],
+        "scale": float(max(metrics["width"], metrics["height"])),
+        "orientation": float(_wrap_angle(orientation)),
+    }
+
+
+def _with_bbox(decoded: dict, bbox: Sequence[float], *, orientation: float | None = None) -> dict:
+    output = copy.deepcopy(decoded)
+    theta = float(output.get("frame", {}).get("orientation", 0.0) if orientation is None else orientation)
+    output["bbox"] = [float(value) for value in bbox]
+    output["frame"] = _frame_from_bbox(output["bbox"], orientation=theta)
+    return output
+
+
+def _clamp_bbox_inside(bbox: Sequence[float], container_bbox: Sequence[float], *, padding: float = 0.0) -> list[float]:
+    child = _bbox_metrics(bbox)
+    container = _bbox_metrics(container_bbox)
+    pad = max(0.0, min(float(padding), container["width"] / 2.0 - 0.5, container["height"] / 2.0 - 0.5))
+    min_x = container["min_x"] + pad
+    min_y = container["min_y"] + pad
+    max_x = container["max_x"] - pad
+    max_y = container["max_y"] - pad
+    available_w = max(1.0, max_x - min_x)
+    available_h = max(1.0, max_y - min_y)
+    width = min(max(1.0, child["width"]), available_w)
+    height = min(max(1.0, child["height"]), available_h)
+    center_x = _clamp(child["center_x"], min_x + width / 2.0, max_x - width / 2.0)
+    center_y = _clamp(child["center_y"], min_y + height / 2.0, max_y - height / 2.0)
+    return _bbox_from_center_size(center_x, center_y, width, height)
+
+
+def _clamp_bbox_to_bounds(bbox: Sequence[float], bounds: Sequence[float]) -> list[float]:
+    return _clamp_bbox_inside(bbox, bounds, padding=0.0)
+
+
+def _adjacent_bbox_from_anchor(
+    bbox: Sequence[float],
+    anchor_bbox: Sequence[float],
+    *,
+    side_bucket: int,
+    gap_bucket: int,
+    config: ParseGraphTokenizerConfig,
+) -> list[float]:
+    child = _bbox_metrics(bbox)
+    anchor = _bbox_metrics(anchor_bbox)
+    width = max(1.0, child["width"])
+    height = max(1.0, child["height"])
+    side = max(0, min(int(side_bucket), 3))
+    decoded_gap = dequantize(int(gap_bucket), low=0.0, high=1.0, bins=config.coarse_relation_bins)
+    gap = min(4.0, decoded_gap * max(anchor["width"], anchor["height"]))
+    if side in {0, 1}:
+        center_y = _clamp(child["center_y"], anchor["min_y"] + height / 2.0, anchor["max_y"] - height / 2.0)
+        center_x = anchor["max_x"] + gap + width / 2.0 if side == 0 else anchor["min_x"] - gap - width / 2.0
+    else:
+        center_x = _clamp(child["center_x"], anchor["min_x"] + width / 2.0, anchor["max_x"] - width / 2.0)
+        center_y = anchor["max_y"] + gap + height / 2.0 if side == 2 else anchor["min_y"] - gap - height / 2.0
+    return _bbox_from_center_size(center_x, center_y, width, height)
+
+
+def _divider_bbox_from_anchor(
+    bbox: Sequence[float],
+    anchor_bbox: Sequence[float],
+    *,
+    axis_bucket: int,
+    thickness_bucket: int,
+    config: ParseGraphTokenizerConfig,
+) -> list[float]:
+    child = _bbox_metrics(bbox)
+    anchor = _bbox_metrics(anchor_bbox)
+    axis = max(0, min(int(axis_bucket), 3))
+    thickness_ratio = dequantize(int(thickness_bucket), low=0.0, high=1.0, bins=config.coarse_relation_bins)
+    thickness = max(1.0, min(max(anchor["width"], anchor["height"]) * 0.08, max(anchor["width"], anchor["height"]) * thickness_ratio))
+    center_x = _clamp(child["center_x"], anchor["min_x"], anchor["max_x"])
+    center_y = _clamp(child["center_y"], anchor["min_y"], anchor["max_y"])
+    if axis == 1:
+        width = min(max(1.0, thickness), anchor["width"])
+        height = max(1.0, anchor["height"])
+    else:
+        width = max(1.0, anchor["width"])
+        height = min(max(1.0, thickness), anchor["height"])
+    return _bbox_from_center_size(center_x, center_y, width, height)
+
+
+def _repair_decoded_frame(
+    action_token: str,
+    decoded: dict,
+    *,
+    anchor_bbox: Sequence[float] | None,
+    relation_extra: dict,
+    config: ParseGraphTokenizerConfig,
+    canvas_bounds: Sequence[float] | None = None,
+) -> dict:
+    orientation = float(decoded.get("frame", {}).get("orientation", 0.0))
+    if action_token == "ACTION_SUPPORT" and canvas_bounds is not None:
+        return _with_bbox(decoded, _clamp_bbox_to_bounds(decoded["bbox"], canvas_bounds), orientation=orientation)
+    if anchor_bbox is None:
+        return decoded
+    if action_token in {"ACTION_INSERT_GROUP", "ACTION_INSERT"}:
+        anchor = _bbox_metrics(anchor_bbox)
+        padding = 0.02 * min(anchor["width"], anchor["height"])
+        return _with_bbox(decoded, _clamp_bbox_inside(decoded["bbox"], anchor_bbox, padding=padding), orientation=orientation)
+    if action_token == "ACTION_ADJACENT_SUPPORT":
+        bbox = _adjacent_bbox_from_anchor(
+            decoded["bbox"],
+            anchor_bbox,
+            side_bucket=int(relation_extra.get("side_bucket", 0)),
+            gap_bucket=int(relation_extra.get("gap_bucket", 0)),
+            config=config,
+        )
+        return _with_bbox(decoded, bbox, orientation=orientation)
+    if action_token == "ACTION_DIVIDER":
+        bbox = _divider_bbox_from_anchor(
+            decoded["bbox"],
+            anchor_bbox,
+            axis_bucket=int(relation_extra.get("axis_bucket", 0)),
+            thickness_bucket=int(relation_extra.get("thickness_bucket", 0)),
+            config=config,
+        )
+        return _with_bbox(decoded, bbox, orientation=orientation)
+    return decoded
+
+
+def _primary_relation_node_id(
+    node_id: str,
+    relation_node_ids: Sequence[str],
+    *,
+    bboxes: dict[str, list[float]],
+) -> str | None:
+    candidates = [str(value) for value in relation_node_ids if value in bboxes]
+    if not candidates:
+        return str(relation_node_ids[0]) if relation_node_ids else None
+    bbox = bboxes.get(node_id)
+    if bbox is None:
+        return candidates[0]
+
+    def score(candidate: str) -> tuple[float, float]:
+        candidate_bbox = bboxes[candidate]
+        inter = _intersection_bbox(bbox, candidate_bbox)
+        inter_area = 0.0 if inter is None else _bbox_metrics(inter)["area"]
+        bbox_area = max(EPS, _bbox_metrics(bbox)["area"])
+        return (inter_area / bbox_area, -_bbox_gap(bbox, candidate_bbox))
+
+    return max(candidates, key=score)
+
+
 def _margin_ratio(child: Sequence[float], anchor: Sequence[float]) -> float:
     anchor_metrics = _bbox_metrics(anchor)
     margins = [
@@ -495,14 +643,18 @@ def build_coarse_scene_actions(
         elif role == "divider_region":
             action_token = "ACTION_DIVIDER"
             relation_token = "REL_DIVIDES"
-            relation_node_ids = [value for value in maps["divides_targets_by_divider"].get(node_id, []) if value in id_to_action_index]
-            anchor_node_id = relation_node_ids[0] if relation_node_ids else None
+            candidates = [value for value in maps["divides_targets_by_divider"].get(node_id, []) if value in id_to_action_index]
+            primary = _primary_relation_node_id(node_id, candidates, bboxes=bboxes)
+            relation_node_ids = [primary] if primary is not None else []
+            anchor_node_id = primary
         elif role in {"support_region", "residual_region"}:
-            relation_node_ids = [candidate for candidate in maps["adjacent_by_node"].get(node_id, []) if candidate in id_to_action_index]
-            if relation_node_ids:
+            candidates = [candidate for candidate in maps["adjacent_by_node"].get(node_id, []) if candidate in id_to_action_index]
+            primary = _primary_relation_node_id(node_id, candidates, bboxes=bboxes)
+            relation_node_ids = [primary] if primary is not None else []
+            if primary is not None:
                 action_token = "ACTION_ADJACENT_SUPPORT"
                 relation_token = "REL_ADJACENT_TO"
-                anchor_node_id = relation_node_ids[0]
+                anchor_node_id = primary
 
         anchor_index = None
         anchor_bbox = None
@@ -544,7 +696,7 @@ def build_coarse_scene_actions(
         action_histogram[action_token] += 1
         anchor_histogram[anchor_mode] += 1
         if relation_token is not None:
-            relation_histogram[relation_token] += max(1, len(action.get("relation_anchor_indices", []) or []))
+            relation_histogram[relation_token] += 1
 
     diagnostics = {
         **order_diagnostics,
@@ -625,15 +777,7 @@ def encode_coarse_scene_target(
         )
         if action["anchor_mode"] == "node":
             relation_token = str(action["relation_token"])
-            if action_token in {"ACTION_DIVIDER", "ACTION_ADJACENT_SUPPORT"}:
-                relation_indices = [
-                    int(value)
-                    for value in action.get("relation_anchor_indices", []) or [int(action["anchor_index"])]
-                ]
-                tokens.extend([relation_token, "COUNT", int_token(len(relation_indices), config=config)])
-                tokens.extend(int_token(index, config=config) for index in relation_indices)
-            else:
-                tokens.extend([relation_token, int_token(int(action["anchor_index"]), config=config)])
+            tokens.extend([relation_token, int_token(int(action["anchor_index"]), config=config)])
             tokens.extend(["ANCHOR_NODE", int_token(int(action["anchor_index"]), config=config)])
             values = _rel_bbox_values(action["bbox"], action["anchor_bbox"], orientation=float(action.get("orientation", 0.0)))
             _append_rel_frame_tokens(tokens, values, config=config)
@@ -777,6 +921,14 @@ def decode_coarse_scene_tokens_to_target(
         if action_token == "ACTION_SUPPORT":
             reader.expect("ANCHOR_GLOBAL")
             decoded = _decode_abs_frame(reader, size=size, config=config)
+            decoded = _repair_decoded_frame(
+                action_token,
+                decoded,
+                anchor_bbox=None,
+                relation_extra={},
+                config=config,
+                canvas_bounds=[0.0, 0.0, float(size[0]), float(size[1])],
+            )
         else:
             expected_relation = {
                 "ACTION_INSERT_GROUP": "REL_INSERTED_IN",
@@ -787,16 +939,8 @@ def decode_coarse_scene_tokens_to_target(
             relation_token = reader.next()
             if relation_token != expected_relation:
                 raise ValueError(f"Expected {expected_relation} for {action_token}, got {relation_token}")
-            if action_token in {"ACTION_DIVIDER", "ACTION_ADJACENT_SUPPORT"}:
-                reader.expect("COUNT")
-                relation_count = reader.next_int()
-                if relation_count <= 0:
-                    raise ValueError(f"{action_token} must reference at least one relation anchor")
-                relation_anchor_indices = [reader.next_int() for _ in range(int(relation_count))]
-                anchor_index = int(relation_anchor_indices[0])
-            else:
-                anchor_index = reader.next_int()
-                relation_anchor_indices = [int(anchor_index)]
+            anchor_index = reader.next_int()
+            relation_anchor_indices = [int(anchor_index)]
             for relation_anchor_index in relation_anchor_indices:
                 if relation_anchor_index < 0 or relation_anchor_index >= len(nodes):
                     raise ValueError(f"Relation anchor index {relation_anchor_index} is not an already generated node")
@@ -826,6 +970,14 @@ def decode_coarse_scene_tokens_to_target(
                         raise ValueError("Adjacent anchor must be a support or residual")
             decoded = _decode_rel_frame(reader, anchor_bbox=anchor_bbox, config=config)
         relation_extra = _skip_relation_extra(reader, action_token)
+        if action_token != "ACTION_SUPPORT":
+            decoded = _repair_decoded_frame(
+                action_token,
+                decoded,
+                anchor_bbox=anchor_bbox,
+                relation_extra=relation_extra,
+                config=config,
+            )
         reader.expect("END_ACTION")
         node_id = _new_node_id(role, counters)
         node = {
@@ -1130,17 +1282,6 @@ class CoarseSceneGrammarState:
             if self.current_action == "ACTION_ADJACENT_SUPPORT":
                 return ["REL_ADJACENT_TO"]
             return ["ANCHOR_GLOBAL"]
-        if self.phase == "relation_count_token":
-            return ["COUNT"]
-        if self.phase == "relation_count":
-            return self._int_tokens(1, max(1, len(self._compatible_anchor_indices())))
-        if self.phase == "relation_anchor_list":
-            used = set(self.current_relation_indices)
-            return [
-                int_token(index, config=cfg)
-                for index in self._compatible_anchor_indices()
-                if index not in used
-            ]
         if self.phase in {"relation_anchor", "anchor_index"}:
             if self.phase == "anchor_index" and self.current_relation_indices:
                 return [int_token(self.current_relation_indices[0], config=cfg)]
@@ -1218,21 +1359,8 @@ class CoarseSceneGrammarState:
         elif self.phase == "relation":
             if token == "ANCHOR_GLOBAL":
                 self.phase = "frame_token"
-            elif self.current_action in {"ACTION_DIVIDER", "ACTION_ADJACENT_SUPPORT"}:
-                self.phase = "relation_count_token"
             else:
                 self.phase = "relation_anchor"
-        elif self.phase == "relation_count_token":
-            self.phase = "relation_count"
-        elif self.phase == "relation_count":
-            self.current_relation_count = token_int(token)
-            self.current_relation_indices = []
-            self.phase = "relation_anchor_list"
-        elif self.phase == "relation_anchor_list":
-            self.current_relation_indices.append(token_int(token))
-            if len(self.current_relation_indices) >= int(self.current_relation_count):
-                self.current_anchor_index = self.current_relation_indices[0]
-                self.phase = "anchor_token"
         elif self.phase == "relation_anchor":
             self.current_anchor_index = token_int(token)
             self.current_relation_indices = [int(self.current_anchor_index)]

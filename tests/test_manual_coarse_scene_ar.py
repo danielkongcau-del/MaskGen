@@ -15,6 +15,31 @@ from partition_gen.manual_coarse_scene_ar import (
     validate_coarse_scene_tokens,
 )
 from partition_gen.parse_graph_tokenizer import ParseGraphTokenizerConfig, build_token_vocabulary, int_token
+from scripts.attach_coarse_scene_true_shape_to_samples import _fit_frame_to_shape_bbox
+
+
+def _bbox_area(bbox: list[float] | None) -> float:
+    if bbox is None:
+        return 0.0
+    return max(0.0, float(bbox[2]) - float(bbox[0])) * max(0.0, float(bbox[3]) - float(bbox[1]))
+
+
+def _bbox_intersection(left: list[float], right: list[float]) -> list[float] | None:
+    min_x = max(float(left[0]), float(right[0]))
+    min_y = max(float(left[1]), float(right[1]))
+    max_x = min(float(left[2]), float(right[2]))
+    max_y = min(float(left[3]), float(right[3]))
+    if max_x <= min_x or max_y <= min_y:
+        return None
+    return [min_x, min_y, max_x, max_y]
+
+
+def _bbox_gap(left: list[float], right: list[float]) -> float:
+    import math
+
+    dx = max(float(right[0]) - float(left[2]), float(left[0]) - float(right[2]), 0.0)
+    dy = max(float(right[1]) - float(left[3]), float(left[1]) - float(right[3]), 0.0)
+    return float(math.hypot(dx, dy))
 
 
 def _topology_target() -> dict:
@@ -158,8 +183,7 @@ class ManualCoarseSceneARTest(unittest.TestCase):
         self.assertTrue(validate_coarse_scene_tokens(tokens)["valid"])
         self.assertIn({"type": "inserted_in", "object": "insert_group_0", "container": "support_0"}, relations)
         self.assertIn({"type": "contains", "parent": "insert_group_0", "child": "insert_0"}, relations)
-        self.assertIn({"type": "divides", "divider": "divider_0", "target": "insert_group_0"}, relations)
-        self.assertIn({"type": "divides", "divider": "divider_0", "target": "support_0"}, relations)
+        self.assertEqual(sum(1 for relation in relations if relation["type"] == "divides"), 1)
         self.assertIn({"type": "adjacent_to", "faces": ["support_0", "support_1"]}, relations)
         self.assertEqual(role_by_id["support_1"], "support_region")
 
@@ -170,7 +194,34 @@ class ManualCoarseSceneARTest(unittest.TestCase):
         self.assertEqual(by_source["support_1"]["action_token"], "ACTION_ADJACENT_SUPPORT")
         self.assertEqual(by_source["insert_0"]["anchor_mode"], "node")
         self.assertEqual(diagnostics["relation_histogram"]["REL_ADJACENT_TO"], 1)
-        self.assertEqual(diagnostics["relation_histogram"]["REL_DIVIDES"], 2)
+        self.assertEqual(diagnostics["relation_histogram"]["REL_DIVIDES"], 1)
+
+    def test_divider_and_adjacent_actions_use_single_anchor_tokens(self) -> None:
+        tokens = encode_coarse_scene_target(_topology_target(), _geometry_targets())
+        for relation_token in ("REL_DIVIDES", "REL_ADJACENT_TO"):
+            index = tokens.index(relation_token)
+            self.assertNotEqual(tokens[index + 1], "COUNT")
+
+    def test_relation_aware_decode_places_adjacent_and_divider_bboxes(self) -> None:
+        tokens = encode_coarse_scene_target(_topology_target(), _geometry_targets())
+        decoded = decode_coarse_scene_tokens_to_target(tokens)
+        nodes = {node["id"]: node for node in decoded["parse_graph"]["nodes"]}
+
+        support_0 = nodes["support_0"]["coarse_bbox"]
+        support_1 = nodes["support_1"]["coarse_bbox"]
+        divider = nodes["divider_0"]["coarse_bbox"]
+        divide_target_id = next(relation["target"] for relation in decoded["parse_graph"]["relations"] if relation["type"] == "divides")
+        divide_target = nodes[divide_target_id]["coarse_bbox"]
+
+        adjacent_intersection = _bbox_intersection(support_0, support_1)
+        adjacent_overlap_ratio = _bbox_area(adjacent_intersection) / max(1e-6, min(_bbox_area(support_0), _bbox_area(support_1)))
+        divider_intersection = _bbox_intersection(divider, divide_target)
+        divider_coverage = _bbox_area(divider_intersection) / max(1e-6, _bbox_area(divider))
+
+        self.assertLessEqual(_bbox_gap(support_0, support_1), 4.0)
+        self.assertLessEqual(adjacent_overlap_ratio, 0.1)
+        self.assertGreaterEqual(divider_coverage, 0.3)
+        self.assertLessEqual(_bbox_area(divider) / max(1e-6, _bbox_area(divide_target)), 1.25)
 
     def test_validator_rejects_forward_anchor(self) -> None:
         tokens = encode_coarse_scene_target(_topology_target(), _geometry_targets())
@@ -201,6 +252,16 @@ class ManualCoarseSceneARTest(unittest.TestCase):
 
         self.assertAlmostEqual(support["frame"]["origin"][0], 128.0, delta=256.0 / 7.0)
         self.assertAlmostEqual(support["frame"]["origin"][1], 128.0, delta=256.0 / 7.0)
+
+    def test_true_shape_fit_offsets_non_centered_local_bbox(self) -> None:
+        frame = {"origin": [0.0, 0.0], "scale": 1.0, "orientation": 0.0}
+        coarse_bbox = [10.0, 20.0, 50.0, 60.0]
+        local_bbox = {"min_x": 1.0, "min_y": -1.0, "width": 2.0, "height": 4.0}
+
+        fitted = _fit_frame_to_shape_bbox(frame, coarse_bbox, local_bbox, mode="contain")
+
+        self.assertEqual(fitted["scale"], 10.0)
+        self.assertEqual(fitted["origin"], [10.0, 30.0])
 
     def test_build_rows_writes_summary_and_dataset_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

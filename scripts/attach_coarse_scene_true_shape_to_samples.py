@@ -80,10 +80,17 @@ def _fit_frame_to_shape_bbox(frame: dict, coarse_bbox: list[float] | None, local
     scale_x = metrics["width"] / local_width
     scale_y = metrics["height"] / local_height
     scale = max(scale_x, scale_y) if str(mode) == "cover" else min(scale_x, scale_y)
+    local_center_x = float(local_bbox.get("min_x", -local_width / 2.0)) + local_width / 2.0
+    local_center_y = float(local_bbox.get("min_y", -local_height / 2.0)) + local_height / 2.0
+    theta = float(frame.get("orientation", 0.0))
+    cos_theta = math.cos(theta)
+    sin_theta = math.sin(theta)
+    offset_x = (local_center_x * cos_theta - local_center_y * sin_theta) * scale
+    offset_y = (local_center_x * sin_theta + local_center_y * cos_theta) * scale
     output = copy.deepcopy(frame)
-    output["origin"] = [float(metrics["center_x"]), float(metrics["center_y"])]
+    output["origin"] = [float(metrics["center_x"] - offset_x), float(metrics["center_y"] - offset_y)]
     output["scale"] = float(max(1.0, scale))
-    output["orientation"] = float(frame.get("orientation", 0.0))
+    output["orientation"] = float(theta)
     return output
 
 
