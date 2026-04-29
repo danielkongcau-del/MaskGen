@@ -6,7 +6,11 @@ from pathlib import Path
 from typing import Sequence
 
 from partition_gen.manual_geometry_conditioning import iter_jsonl
-from partition_gen.manual_layout_residual import geometry_local_bbox, scaled_bbox_metrics
+from partition_gen.manual_layout_residual import (
+    geometry_local_bbox,
+    geometry_renderable_local_points,
+    scaled_bbox_metrics,
+)
 from partition_gen.manual_layout_retrieval import load_split_row
 
 
@@ -65,6 +69,40 @@ def _local_bbox_world_bbox(local_bbox: dict, frame: dict) -> list[float]:
     return [float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys))]
 
 
+def _local_points_world_bbox(points: Sequence[Sequence[float]], frame: dict) -> list[float] | None:
+    import math
+
+    if not points:
+        return None
+    origin_x, origin_y = _frame_origin(frame)
+    scale = max(float(frame.get("scale", 1.0)), 1e-8)
+    theta = float(frame.get("orientation", 0.0))
+    cos_theta = math.cos(theta)
+    sin_theta = math.sin(theta)
+    world_points = []
+    for point in points:
+        local_x = float(point[0])
+        local_y = float(point[1])
+        x = local_x * scale
+        y = local_y * scale
+        world_points.append(
+            (
+                origin_x + x * cos_theta - y * sin_theta,
+                origin_y + x * sin_theta + y * cos_theta,
+            )
+        )
+    xs = [point[0] for point in world_points]
+    ys = [point[1] for point in world_points]
+    return [float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys))]
+
+
+def _bbox_metrics(bbox: Sequence[float]) -> dict:
+    min_x, min_y, max_x, max_y = [float(value) for value in bbox]
+    width = max(0.0, max_x - min_x)
+    height = max(0.0, max_y - min_y)
+    return {"width": float(width), "height": float(height), "area": float(width * height)}
+
+
 def _bbox_intersects_canvas(bbox: Sequence[float], canvas_size: Sequence[float]) -> bool:
     width = float(canvas_size[0]) if len(canvas_size) >= 1 else 256.0
     height = float(canvas_size[1]) if len(canvas_size) >= 2 else width
@@ -80,17 +118,59 @@ def local_bbox_quality(
     min_world_bbox_area: float = 1.0,
     min_local_bbox_side: float = 1e-6,
 ) -> dict:
+    return _local_bbox_quality(
+        local_bbox,
+        frame,
+        canvas_size=canvas_size,
+        min_world_bbox_area=min_world_bbox_area,
+        min_local_bbox_side=min_local_bbox_side,
+    )
+
+
+def geometry_target_quality(
+    geometry_target: dict,
+    frame: dict,
+    *,
+    canvas_size: Sequence[float] | None = None,
+    min_world_bbox_area: float = 1.0,
+    min_local_bbox_side: float = 1e-6,
+) -> dict:
+    local_bbox = geometry_local_bbox(geometry_target)
+    points = geometry_renderable_local_points(geometry_target)
+    return _local_bbox_quality(
+        local_bbox,
+        frame,
+        canvas_size=canvas_size,
+        min_world_bbox_area=min_world_bbox_area,
+        min_local_bbox_side=min_local_bbox_side,
+        world_bbox=_local_points_world_bbox(points, frame),
+    )
+
+
+def _local_bbox_quality(
+    local_bbox: dict | None,
+    frame: dict,
+    *,
+    canvas_size: Sequence[float] | None = None,
+    min_world_bbox_area: float = 1.0,
+    min_local_bbox_side: float = 1e-6,
+    world_bbox: Sequence[float] | None = None,
+) -> dict:
     local_bbox = local_bbox or {"width": 0.0, "height": 0.0}
     local_width = abs(float(local_bbox.get("width", 0.0)))
     local_height = abs(float(local_bbox.get("height", 0.0)))
     scale = float(frame.get("scale", 1.0))
     scaled = scaled_bbox_metrics(local_bbox, scale)
+    has_points = bool(local_bbox.get("has_points", True))
     local_side_ok = local_width > float(min_local_bbox_side) and local_height > float(min_local_bbox_side)
-    world_area_ok = float(scaled["area"]) > float(min_world_bbox_area)
-    world_bbox = _local_bbox_world_bbox(local_bbox, frame)
+    world_bbox = list(world_bbox) if world_bbox is not None else _local_bbox_world_bbox(local_bbox, frame)
+    world_metrics = _bbox_metrics(world_bbox)
+    world_area_ok = float(world_metrics["area"]) > float(min_world_bbox_area)
     intersects_canvas = True if canvas_size is None else _bbox_intersects_canvas(world_bbox, canvas_size)
-    usable = bool(local_side_ok and world_area_ok and intersects_canvas)
+    usable = bool(has_points and local_side_ok and world_area_ok and intersects_canvas)
     reasons: list[str] = []
+    if not has_points:
+        reasons.append("missing_renderable_local_bbox")
     if not local_side_ok:
         reasons.append("degenerate_local_bbox")
     if not world_area_ok:
@@ -104,10 +184,14 @@ def local_bbox_quality(
         "local_width": float(local_width),
         "local_height": float(local_height),
         "local_area": float(local_width * local_height),
-        "world_width": float(scaled["width"]),
-        "world_height": float(scaled["height"]),
-        "world_area": float(scaled["area"]),
-        "world_bbox": world_bbox,
+        "has_points": bool(has_points),
+        "scaled_bbox_width": float(scaled["width"]),
+        "scaled_bbox_height": float(scaled["height"]),
+        "scaled_bbox_area": float(scaled["area"]),
+        "world_width": float(world_metrics["width"]),
+        "world_height": float(world_metrics["height"]),
+        "world_area": float(world_metrics["area"]),
+        "world_bbox": [float(value) for value in world_bbox],
         "bbox_intersects_canvas": bool(intersects_canvas),
         "canvas_size": None if canvas_size is None else [float(value) for value in canvas_size],
         "scale": float(scale),
@@ -153,7 +237,8 @@ def build_geometry_shape_fallback_library(
                 continue
             local_bbox = geometry_local_bbox(geometry_target)
             if (
-                abs(float(local_bbox.get("width", 0.0))) <= float(min_local_bbox_side)
+                not bool(local_bbox.get("has_points", True))
+                or abs(float(local_bbox.get("width", 0.0))) <= float(min_local_bbox_side)
                 or abs(float(local_bbox.get("height", 0.0))) <= float(min_local_bbox_side)
             ):
                 skipped_degenerate += 1

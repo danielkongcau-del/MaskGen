@@ -24,7 +24,7 @@ from partition_gen.manual_geometry_sample_validation import decode_geometry_toke
 from partition_gen.manual_geometry_shape_fallback import (  # noqa: E402
     build_geometry_shape_fallback_library,
     geometry_target_from_fallback_shape,
-    local_bbox_quality,
+    geometry_target_quality,
     select_fallback_geometry_shape,
 )
 from partition_gen.manual_layout_residual import (  # noqa: E402
@@ -362,8 +362,8 @@ def main() -> None:
                                 generated_local_bbox,
                                 config=tokenizer_config,
                             )
-                            quality = local_bbox_quality(
-                                generated_local_bbox,
+                            quality = geometry_target_quality(
+                                generated,
                                 final_frame,
                                 canvas_size=topology_target.get("size", [256, 256]),
                                 min_world_bbox_area=float(args.min_generated_world_bbox_area),
@@ -403,8 +403,8 @@ def main() -> None:
                                     generated_local_bbox,
                                     config=tokenizer_config,
                                 )
-                                quality = local_bbox_quality(
-                                    generated_local_bbox,
+                                quality = geometry_target_quality(
+                                    generated,
                                     final_frame,
                                     canvas_size=topology_target.get("size", [256, 256]),
                                     min_world_bbox_area=float(args.min_generated_world_bbox_area),

@@ -10,6 +10,7 @@ import torch
 from partition_gen.manual_geometry_shape_fallback import (
     build_geometry_shape_fallback_library,
     geometry_target_from_fallback_shape,
+    geometry_target_quality,
     local_bbox_quality,
     select_fallback_geometry_shape,
 )
@@ -23,6 +24,7 @@ from partition_gen.manual_layout_residual import (
     collate_layout_residual_examples,
     evaluate_layout_residual_regressor,
     frame_residual_target,
+    geometry_local_bbox,
     geometry_aware_scale_max,
     layout_residual_loss,
     residual_values_to_raw_scale,
@@ -174,6 +176,52 @@ class ManualLayoutResidualTest(unittest.TestCase):
         self.assertEqual(clamped["scale"], 96.0)
         self.assertTrue(diagnostics["geometry_scale_clamped"])
         self.assertTrue(diagnostics["geometry_frame_clamp_strong"])
+
+    def test_geometry_local_bbox_matches_renderable_polygons(self) -> None:
+        target = _geometry_target(
+            "support_0",
+            "support_region",
+            0,
+            [128.0, 128.0],
+        )
+        target["geometry"]["outer_local"] = [[-4.0, -4.0], [4.0, -4.0], [4.0, 4.0], [-4.0, 4.0]]
+        target["geometry"]["polygons_local"] = [
+            {
+                "outer_local": [[0.0, 0.0], [0.25, 0.0], [0.25, 0.5], [0.0, 0.5]],
+                "holes_local": [],
+            }
+        ]
+
+        local_bbox = geometry_local_bbox(target)
+
+        self.assertEqual(local_bbox["width"], 0.25)
+        self.assertEqual(local_bbox["height"], 0.5)
+        self.assertTrue(local_bbox["has_points"])
+
+    def test_geometry_target_quality_matches_renderable_polygons(self) -> None:
+        target = _geometry_target(
+            "support_0",
+            "support_region",
+            0,
+            [128.0, 128.0],
+        )
+        target["geometry"]["outer_local"] = [[-4.0, -4.0], [4.0, -4.0], [4.0, 4.0], [-4.0, 4.0]]
+        target["geometry"]["polygons_local"] = [
+            {
+                "outer_local": [[0.0, 0.0], [0.25, 0.0], [0.25, 0.5], [0.0, 0.5]],
+                "holes_local": [],
+            }
+        ]
+
+        quality = geometry_target_quality(
+            target,
+            {"origin": [64.0, 96.0], "scale": 2.0, "orientation": 0.0},
+            min_world_bbox_area=1.0,
+        )
+
+        self.assertFalse(quality["usable"])
+        self.assertIn("tiny_world_bbox", quality["reasons"])
+        self.assertEqual(quality["world_area"], 0.5)
 
     def test_local_bbox_quality_marks_tiny_world_bbox(self) -> None:
         quality = local_bbox_quality(

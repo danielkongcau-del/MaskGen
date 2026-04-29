@@ -193,7 +193,7 @@ def residual_values_to_frame(
     return frame
 
 
-def geometry_local_bbox(geometry_target: dict) -> dict:
+def geometry_renderable_local_points(geometry_target: dict) -> list[tuple[float, float]]:
     points: list[tuple[float, float]] = []
 
     def add_points(values: object) -> None:
@@ -202,17 +202,31 @@ def geometry_local_bbox(geometry_target: dict) -> dict:
                 points.append((float(point[0]), float(point[1])))
 
     geometry = geometry_target.get("geometry", {}) or {}
-    add_points(geometry.get("outer_local", []))
-    for hole in geometry.get("holes_local", []) or []:
-        add_points(hole)
-    for polygon in geometry.get("polygons_local", []) or []:
+    polygons = geometry.get("polygons_local") or [
+        {"outer_local": geometry.get("outer_local", []), "holes_local": geometry.get("holes_local", [])}
+    ]
+    for polygon in polygons:
         add_points((polygon or {}).get("outer_local", []))
         for hole in (polygon or {}).get("holes_local", []) or []:
             add_points(hole)
     for atom in geometry_target.get("atoms", []) or []:
         add_points((atom or {}).get("outer_local", []))
+    return points
+
+
+def geometry_local_bbox(geometry_target: dict) -> dict:
+    points = geometry_renderable_local_points(geometry_target)
     if not points:
-        return {"min_x": -0.5, "min_y": -0.5, "max_x": 0.5, "max_y": 0.5, "width": 1.0, "height": 1.0}
+        return {
+            "min_x": -0.5,
+            "min_y": -0.5,
+            "max_x": 0.5,
+            "max_y": 0.5,
+            "width": 1.0,
+            "height": 1.0,
+            "point_count": 0,
+            "has_points": False,
+        }
     xs = [point[0] for point in points]
     ys = [point[1] for point in points]
     width = float(max(xs) - min(xs))
@@ -224,6 +238,8 @@ def geometry_local_bbox(geometry_target: dict) -> dict:
         "max_y": float(max(ys)),
         "width": width,
         "height": height,
+        "point_count": int(len(points)),
+        "has_points": True,
     }
 
 
