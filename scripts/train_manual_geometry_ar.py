@@ -25,6 +25,11 @@ from partition_gen.manual_ar_training import (  # noqa: E402
     save_checkpoint,
     save_json,
 )
+from partition_gen.manual_coarse_scene_ar import (  # noqa: E402
+    CoarseSceneSamplerConfig,
+    evaluate_coarse_scene_sample_rows,
+    sample_model_coarse_scene_rows,
+)
 from partition_gen.manual_geometry_constrained_sampling import GeometryConstrainedSamplerConfig  # noqa: E402
 from partition_gen.manual_geometry_conditioned_evaluation import (  # noqa: E402
     sample_model_conditioned_geometry_rows,
@@ -54,7 +59,7 @@ def parse_args() -> argparse.Namespace:
         "--sequence-kind",
         type=str,
         default="geometry",
-        choices=["geometry", "conditioned_geometry", "oracle_frame_geometry", "layout", "relative_layout"],
+        choices=["geometry", "conditioned_geometry", "oracle_frame_geometry", "layout", "relative_layout", "coarse_scene"],
     )
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/manual_geometry_ar"))
     parser.add_argument("--run-name", type=str, default=None)
@@ -378,6 +383,29 @@ def main() -> None:
                     summary = evaluate_relative_layout_sample_rows(rows, top_k_invalid=10)
                     save_json(output_dir / f"relative_layout_eval_iter_{iter_num}.json", summary)
                     metrics.update(compact_layout_eval_metrics(summary))
+                elif str(args.sequence_kind) == "coarse_scene":
+                    rows = sample_model_coarse_scene_rows(
+                        model,
+                        vocab,
+                        num_samples=int(args.geometry_eval_samples),
+                        max_new_tokens=int(args.geometry_eval_max_new_tokens),
+                        temperature=float(args.geometry_eval_temperature),
+                        top_k=int(args.geometry_eval_top_k) if int(args.geometry_eval_top_k) > 0 else None,
+                        device=device,
+                        sampler_config=CoarseSceneSamplerConfig(),
+                        progress_every=int(args.geometry_eval_progress_every),
+                        progress_label=f"coarse_scene_eval_iter_{iter_num}",
+                    )
+                    summary = evaluate_coarse_scene_sample_rows(rows, top_k_invalid=10)
+                    save_json(output_dir / f"coarse_scene_eval_iter_{iter_num}.json", summary)
+                    metrics.update(
+                        {
+                            "coarse_scene_valid_rate": float(summary.get("valid_rate", 0.0)),
+                            "coarse_scene_valid_count": int(summary.get("valid_count", 0)),
+                            "coarse_scene_sample_count": int(summary.get("sample_count", 0)),
+                            "coarse_scene_hit_eos_count": int(summary.get("hit_eos_count", 0)),
+                        }
+                    )
                 else:
                     rows = sample_model_geometry_rows(
                         model,

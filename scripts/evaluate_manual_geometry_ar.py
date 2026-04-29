@@ -14,6 +14,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from partition_gen.manual_ar_training import load_checkpoint  # noqa: E402
+from partition_gen.manual_coarse_scene_ar import (  # noqa: E402
+    CoarseSceneSamplerConfig,
+    evaluate_coarse_scene_sample_rows,
+    sample_model_coarse_scene_rows,
+)
 from partition_gen.manual_geometry_conditioned_evaluation import (  # noqa: E402
     sample_model_conditioned_geometry_rows,
     sample_model_oracle_frame_geometry_rows,
@@ -46,7 +51,7 @@ def parse_args() -> argparse.Namespace:
         "--sequence-kind",
         type=str,
         default="auto",
-        choices=["auto", "geometry", "conditioned_geometry", "oracle_frame_geometry", "layout", "relative_layout"],
+        choices=["auto", "geometry", "conditioned_geometry", "oracle_frame_geometry", "layout", "relative_layout", "coarse_scene"],
     )
     parser.add_argument("--num-samples", type=int, default=100)
     parser.add_argument("--max-new-tokens", type=int, default=512)
@@ -210,6 +215,19 @@ def main() -> None:
             progress_every=int(args.progress_every),
             progress_label="relative_layout_eval",
         )
+    elif sequence_kind == "coarse_scene":
+        rows = sample_model_coarse_scene_rows(
+            model,
+            vocab,
+            num_samples=int(args.num_samples),
+            max_new_tokens=int(args.max_new_tokens),
+            temperature=float(args.temperature),
+            top_k=int(args.top_k) if int(args.top_k) > 0 else None,
+            device=device,
+            sampler_config=CoarseSceneSamplerConfig(),
+            progress_every=int(args.progress_every),
+            progress_label="coarse_scene_eval",
+        )
     else:
         rows = sample_model_geometry_rows(
             model,
@@ -245,6 +263,8 @@ def main() -> None:
         summary = evaluate_layout_sample_rows(rows, top_k_invalid=int(args.top_k_invalid))
     elif sequence_kind == "relative_layout":
         summary = evaluate_relative_layout_sample_rows(rows, top_k_invalid=int(args.top_k_invalid))
+    elif sequence_kind == "coarse_scene":
+        summary = evaluate_coarse_scene_sample_rows(rows, top_k_invalid=int(args.top_k_invalid))
     else:
         summary = evaluate_geometry_sample_rows(rows, top_k_invalid=int(args.top_k_invalid))
     summary.update(
@@ -259,7 +279,26 @@ def main() -> None:
     )
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     args.output_json.write_text(json.dumps(summary, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
-    if sequence_kind in {"layout", "relative_layout"}:
+    if sequence_kind in {"layout", "relative_layout", "coarse_scene"}:
+        if sequence_kind == "coarse_scene":
+            lines = [
+                "# Manual Coarse Scene AR Evaluation",
+                "",
+                f"- samples: {summary.get('sample_count')}",
+                f"- valid: {summary.get('valid_count')} ({summary.get('valid_rate')})",
+                f"- semantic valid: {summary.get('semantic_valid_count')} ({summary.get('semantic_valid_rate')})",
+                f"- hit_eos: {summary.get('hit_eos_count')}",
+                f"- actions: `{json.dumps(summary.get('action_histogram', {}), ensure_ascii=False)}`",
+            ]
+            args.summary_md.parent.mkdir(parents=True, exist_ok=True)
+            args.summary_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            if args.output_samples is not None:
+                write_geometry_sample_rows(args.output_samples, rows)
+            print(
+                f"evaluated {sequence_kind} samples={summary['sample_count']} valid={summary['valid_count']} "
+                f"valid_rate={summary['valid_rate']:.4f} hit_eos={summary['hit_eos_count']} output={args.output_json}"
+            )
+            return
         lines = [
             "# Manual Relative Layout AR Evaluation" if sequence_kind == "relative_layout" else "# Manual Layout AR Evaluation",
             "",

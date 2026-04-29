@@ -196,6 +196,10 @@ Builds oracle-frame local geometry token sequences.
 
 Each row contains topology context, target node index, and a forced geometry prefix through true `FRAME`. The row's `loss_start_index` points at `POLYS` or `ATOMS`, so the model learns only local shape and does not predict frame.
 
+### Legacy layout route archive
+
+The legacy absolute-layout, relative-layout, retrieved-layout, and residual-layout script entrypoints described below were archived on 2026-04-30 under `scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/`. Keep these descriptions as historical references for baseline reproduction. New layout/topology experiments should use the parent-first coarse-scene scripts.
+
 ### `scripts/tokenize_manual_layout_dataset.py`
 
 Builds topology-conditioned absolute layout token sequences.
@@ -335,6 +339,40 @@ Use this to isolate relative layout quality before introducing generated topolog
 Attaches relative-layout-AR predicted frames plus placeholder local shapes to generated topology samples.
 
 It decodes generated topology rows, samples constrained `MANUAL_REL_LAYOUT_V1`, reconstructs absolute frames from relative anchors, and retrieves local shapes by `(role, label, geometry_model)` from a split dataset. It also supports `--safe-relative-layout` for the diagnostic safe sampler path.
+
+### `scripts/tokenize_manual_coarse_scene_dataset.py`
+
+Tokenizes parent-first joint topology and coarse layout sequences.
+
+It writes `coarse_scene_sequences.jsonl` using `MANUAL_COARSE_SCENE_V1`, where every action creates one node and immediately emits its coarse frame plus any parent/anchor relation. Insert groups, inserts, dividers, and adjacent supports can only reference nodes already generated earlier in the sequence. The summary records action histograms, anchor modes, relation histograms, dependency fallbacks, forward references, and coarse clipping counts.
+
+### `scripts/train_manual_coarse_scene_ar.py`
+
+Trains the parent-first coarse scene AR generator.
+
+This is a wrapper around `train_manual_geometry_ar.py` with `--sequence-kind coarse_scene` and default output root `outputs/manual_coarse_scene_ar`. Evaluation samples use the action-level constrained sampler and report coarse-scene token validity.
+
+### `scripts/sample_manual_coarse_scene_ar.py`
+
+Samples constrained `MANUAL_COARSE_SCENE_V1` rows from a coarse scene checkpoint.
+
+It can write JSONL token samples and, with `--write-graphs --output-root`, decoded parse-graph targets with coarse frames. These targets are intended for true-shape attachment and relation-spatial audit before reintroducing generated local geometry.
+
+### `scripts/attach_coarse_scene_true_shape_to_samples.py`
+
+Attaches true local shapes to coarse-scene sampled frames.
+
+It decodes coarse-scene token rows, retrieves fallback true shapes from a split root by `(role, label, geometry_model)`, fits each shape to the decoded coarse bbox, and writes full parse-graph JSONs. This isolates whether the new parent-first coarse layout tokens improve spatial relations without residual retrieval or generated local-shape noise.
+
+### `scripts/evaluate_manual_coarse_scene_relation_spatial.py`
+
+Runs the standard relation-spatial audit on coarse-scene outputs and adds baseline deltas.
+
+The comparison defaults are the retrieved-residual true-shape baseline: overall pass `0.4048`, `adjacent_to` pass `0.0479`, `divides` pass `0.1623`, and `inserted_in` pass `0.4909`.
+
+### Legacy layout-frame route archive
+
+The layout-frame MLP script entrypoints described below were archived on 2026-04-30 under `scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/`. They are retained for historical diagnostics, not current coarse-scene development.
 
 ### `scripts/train_manual_layout_frame.py`
 

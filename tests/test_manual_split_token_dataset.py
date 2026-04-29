@@ -63,6 +63,19 @@ class ManualSplitTokenDatasetTest(unittest.TestCase):
             ],
         )
         _write_jsonl(
+            token_root / "coarse_scene_sequences.jsonl",
+            [
+                {
+                    "format": "maskgen_tokenized_parse_graph_v1",
+                    "tokenizer": "manual_coarse_scene_v1",
+                    "stem": "a",
+                    "source_target": "topology/a.json",
+                    "length": 3,
+                    "tokens": ["<BOS>", "MANUAL_COARSE_SCENE_V1", "<EOS>"],
+                }
+            ],
+        )
+        _write_jsonl(
             token_root / "manifest.jsonl",
             [
                 {
@@ -111,6 +124,14 @@ class ManualSplitTokenDatasetTest(unittest.TestCase):
             batch = next(iter(loader))
             self.assertEqual(batch["sequence_kind"], "geometry")
             self.assertEqual(tuple(batch["input_ids"].shape), (1, 2))
+
+    def test_coarse_scene_sequence_kind(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            token_root = self.make_token_root(Path(tmp))
+            dataset = ManualSplitTokenSequenceDataset(token_root, sequence_kind="coarse_scene")
+            item = dataset[0]
+            self.assertEqual(item["sequence_kind"], "coarse_scene")
+            self.assertEqual(item["length"], 3)
 
 
 if __name__ == "__main__":

@@ -16,7 +16,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--token-root", type=Path, required=True)
     parser.add_argument(
         "--sequence-kind",
-        choices=["topology", "geometry", "conditioned_geometry", "oracle_frame_geometry", "layout", "relative_layout"],
+        choices=[
+            "topology",
+            "geometry",
+            "conditioned_geometry",
+            "oracle_frame_geometry",
+            "layout",
+            "relative_layout",
+            "coarse_scene",
+        ],
         default="topology",
     )
     parser.add_argument("--batch-size", type=int, default=4)

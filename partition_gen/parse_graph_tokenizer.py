@@ -72,6 +72,16 @@ STATIC_TOKENS = [
     "MANUAL_LAYOUT_CONDITION_V1",
     "MANUAL_REL_LAYOUT_V1",
     "MANUAL_REL_LAYOUT_CONDITION_V1",
+    "MANUAL_COARSE_SCENE_V1",
+    "COARSE_SCENE_TARGET",
+    "ACTION_SUPPORT",
+    "ACTION_INSERT_GROUP",
+    "ACTION_INSERT",
+    "ACTION_DIVIDER",
+    "ACTION_ADJACENT_SUPPORT",
+    "FRAME_ABS_COARSE",
+    "FRAME_REL_COARSE",
+    "END_ACTION",
     "TOPOLOGY_CONTEXT",
     "TARGET_NODE",
     "GEOMETRY_TARGET",
@@ -122,6 +132,11 @@ class ParseGraphTokenizerConfig:
     relative_offset_max: float = 8.0
     relative_log_scale_min: float = -6.0
     relative_log_scale_max: float = 6.0
+    coarse_grid_bins: int = 8
+    coarse_size_bins: int = 8
+    coarse_aspect_bins: int = 8
+    coarse_angle_bins: int = 8
+    coarse_relation_bins: int = 8
     max_int: int = 4096
 
 
@@ -174,6 +189,11 @@ def build_token_vocabulary(config: ParseGraphTokenizerConfig | None = None) -> D
         int(config.angle_bins),
         int(config.area_bins),
         int(config.length_bins),
+        int(config.coarse_grid_bins),
+        int(config.coarse_size_bins),
+        int(config.coarse_aspect_bins),
+        int(config.coarse_angle_bins),
+        int(config.coarse_relation_bins),
     )
     tokens.extend(f"Q_{index}" for index in range(max_q))
     return {token: index for index, token in enumerate(tokens)}

@@ -1,0 +1,183 @@
+﻿{
+    "format":  "maskgen_source_archive_manifest_v1",
+    "archived_at":  "2026-04-30",
+    "archive_root":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes",
+    "policy":  "Only standalone legacy script entrypoints were archived. partition_gen modules, tests, and current coarse scene scripts were left in place.",
+    "files":  [
+                  {
+                      "file":  "attach_retrieved_residual_layout_true_shape_to_topology_samples.py",
+                      "status":  "archived",
+                      "from":  "scripts/attach_retrieved_residual_layout_true_shape_to_topology_samples.py",
+                      "to":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/attach_retrieved_residual_layout_true_shape_to_topology_samples.py",
+                      "reason":  "legacy layout/retrieval/residual route superseded by parent-first coarse scene route"
+                  },
+                  {
+                      "file":  "attach_retrieved_residual_layout_oracle_frame_geometry_to_topology_samples.py",
+                      "status":  "archived",
+                      "from":  "scripts/attach_retrieved_residual_layout_oracle_frame_geometry_to_topology_samples.py",
+                      "to":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/attach_retrieved_residual_layout_oracle_frame_geometry_to_topology_samples.py",
+                      "reason":  "legacy layout/retrieval/residual route superseded by parent-first coarse scene route"
+                  },
+                  {
+                      "file":  "attach_retrieved_residual_layout_oracle_frame_geometry_to_split_targets.py",
+                      "status":  "archived",
+                      "from":  "scripts/attach_retrieved_residual_layout_oracle_frame_geometry_to_split_targets.py",
+                      "to":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/attach_retrieved_residual_layout_oracle_frame_geometry_to_split_targets.py",
+                      "reason":  "legacy layout/retrieval/residual route superseded by parent-first coarse scene route"
+                  },
+                  {
+                      "file":  "attach_retrieved_residual_layout_to_split_targets.py",
+                      "status":  "archived",
+                      "from":  "scripts/attach_retrieved_residual_layout_to_split_targets.py",
+                      "to":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/attach_retrieved_residual_layout_to_split_targets.py",
+                      "reason":  "legacy layout/retrieval/residual route superseded by parent-first coarse scene route"
+                  },
+                  {
+                      "file":  "attach_retrieved_layout_oracle_frame_geometry_to_topology_samples.py",
+                      "status":  "archived",
+                      "from":  "scripts/attach_retrieved_layout_oracle_frame_geometry_to_topology_samples.py",
+                      "to":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/attach_retrieved_layout_oracle_frame_geometry_to_topology_samples.py",
+                      "reason":  "legacy layout/retrieval/residual route superseded by parent-first coarse scene route"
+                  },
+                  {
+                      "file":  "attach_retrieved_layout_oracle_frame_geometry_to_split_targets.py",
+                      "status":  "archived",
+                      "from":  "scripts/attach_retrieved_layout_oracle_frame_geometry_to_split_targets.py",
+                      "to":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/attach_retrieved_layout_oracle_frame_geometry_to_split_targets.py",
+                      "reason":  "legacy layout/retrieval/residual route superseded by parent-first coarse scene route"
+                  },
+                  {
+                      "file":  "attach_retrieved_layout_to_split_targets.py",
+                      "status":  "archived",
+                      "from":  "scripts/attach_retrieved_layout_to_split_targets.py",
+                      "to":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/attach_retrieved_layout_to_split_targets.py",
+                      "reason":  "legacy layout/retrieval/residual route superseded by parent-first coarse scene route"
+                  },
+                  {
+                      "file":  "attach_layout_frame_to_topology_samples.py",
+                      "status":  "archived",
+                      "from":  "scripts/attach_layout_frame_to_topology_samples.py",
+                      "to":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/attach_layout_frame_to_topology_samples.py",
+                      "reason":  "legacy layout/retrieval/residual route superseded by parent-first coarse scene route"
+                  },
+                  {
+                      "file":  "attach_layout_frame_to_split_targets.py",
+                      "status":  "archived",
+                      "from":  "scripts/attach_layout_frame_to_split_targets.py",
+                      "to":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/attach_layout_frame_to_split_targets.py",
+                      "reason":  "legacy layout/retrieval/residual route superseded by parent-first coarse scene route"
+                  },
+                  {
+                      "file":  "attach_layout_ar_to_topology_samples.py",
+                      "status":  "archived",
+                      "from":  "scripts/attach_layout_ar_to_topology_samples.py",
+                      "to":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/attach_layout_ar_to_topology_samples.py",
+                      "reason":  "legacy layout/retrieval/residual route superseded by parent-first coarse scene route"
+                  },
+                  {
+                      "file":  "attach_layout_ar_to_split_targets.py",
+                      "status":  "archived",
+                      "from":  "scripts/attach_layout_ar_to_split_targets.py",
+                      "to":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/attach_layout_ar_to_split_targets.py",
+                      "reason":  "legacy layout/retrieval/residual route superseded by parent-first coarse scene route"
+                  },
+                  {
+                      "file":  "evaluate_manual_layout_residual.py",
+                      "status":  "archived",
+                      "from":  "scripts/evaluate_manual_layout_residual.py",
+                      "to":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/evaluate_manual_layout_residual.py",
+                      "reason":  "legacy layout/retrieval/residual route superseded by parent-first coarse scene route"
+                  },
+                  {
+                      "file":  "train_manual_layout_residual.py",
+                      "status":  "archived",
+                      "from":  "scripts/train_manual_layout_residual.py",
+                      "to":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/train_manual_layout_residual.py",
+                      "reason":  "legacy layout/retrieval/residual route superseded by parent-first coarse scene route"
+                  },
+                  {
+                      "file":  "evaluate_manual_layout_frame.py",
+                      "status":  "archived",
+                      "from":  "scripts/evaluate_manual_layout_frame.py",
+                      "to":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/evaluate_manual_layout_frame.py",
+                      "reason":  "legacy layout/retrieval/residual route superseded by parent-first coarse scene route"
+                  },
+                  {
+                      "file":  "train_manual_layout_frame.py",
+                      "status":  "archived",
+                      "from":  "scripts/train_manual_layout_frame.py",
+                      "to":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/train_manual_layout_frame.py",
+                      "reason":  "legacy layout/retrieval/residual route superseded by parent-first coarse scene route"
+                  },
+                  {
+                      "file":  "train_manual_layout_frame_regression.py",
+                      "status":  "archived",
+                      "from":  "scripts/train_manual_layout_frame_regression.py",
+                      "to":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/train_manual_layout_frame_regression.py",
+                      "reason":  "legacy layout/retrieval/residual route superseded by parent-first coarse scene route"
+                  },
+                  {
+                      "file":  "overfit_manual_layout_frame.py",
+                      "status":  "archived",
+                      "from":  "scripts/overfit_manual_layout_frame.py",
+                      "to":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/overfit_manual_layout_frame.py",
+                      "reason":  "legacy layout/retrieval/residual route superseded by parent-first coarse scene route"
+                  },
+                  {
+                      "file":  "tokenize_manual_layout_dataset.py",
+                      "status":  "archived",
+                      "from":  "scripts/tokenize_manual_layout_dataset.py",
+                      "to":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/tokenize_manual_layout_dataset.py",
+                      "reason":  "legacy layout/retrieval/residual route superseded by parent-first coarse scene route"
+                  },
+                  {
+                      "file":  "train_manual_layout_ar.py",
+                      "status":  "archived",
+                      "from":  "scripts/train_manual_layout_ar.py",
+                      "to":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/train_manual_layout_ar.py",
+                      "reason":  "legacy layout/retrieval/residual route superseded by parent-first coarse scene route"
+                  },
+                  {
+                      "file":  "evaluate_manual_layout_ar.py",
+                      "status":  "archived",
+                      "from":  "scripts/evaluate_manual_layout_ar.py",
+                      "to":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/evaluate_manual_layout_ar.py",
+                      "reason":  "legacy layout/retrieval/residual route superseded by parent-first coarse scene route"
+                  },
+                  {
+                      "file":  "tokenize_manual_relative_layout_dataset.py",
+                      "status":  "archived",
+                      "from":  "scripts/tokenize_manual_relative_layout_dataset.py",
+                      "to":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/tokenize_manual_relative_layout_dataset.py",
+                      "reason":  "legacy layout/retrieval/residual route superseded by parent-first coarse scene route"
+                  },
+                  {
+                      "file":  "train_manual_relative_layout_ar.py",
+                      "status":  "archived",
+                      "from":  "scripts/train_manual_relative_layout_ar.py",
+                      "to":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/train_manual_relative_layout_ar.py",
+                      "reason":  "legacy layout/retrieval/residual route superseded by parent-first coarse scene route"
+                  },
+                  {
+                      "file":  "evaluate_manual_relative_layout_ar.py",
+                      "status":  "archived",
+                      "from":  "scripts/evaluate_manual_relative_layout_ar.py",
+                      "to":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/evaluate_manual_relative_layout_ar.py",
+                      "reason":  "legacy layout/retrieval/residual route superseded by parent-first coarse scene route"
+                  },
+                  {
+                      "file":  "attach_relative_layout_ar_to_topology_samples.py",
+                      "status":  "archived",
+                      "from":  "scripts/attach_relative_layout_ar_to_topology_samples.py",
+                      "to":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/attach_relative_layout_ar_to_topology_samples.py",
+                      "reason":  "legacy layout/retrieval/residual route superseded by parent-first coarse scene route"
+                  },
+                  {
+                      "file":  "attach_relative_layout_ar_to_split_targets.py",
+                      "status":  "archived",
+                      "from":  "scripts/attach_relative_layout_ar_to_split_targets.py",
+                      "to":  "scripts/_archive/20260430_pre_coarse_cleanup/legacy_layout_routes/attach_relative_layout_ar_to_split_targets.py",
+                      "reason":  "legacy layout/retrieval/residual route superseded by parent-first coarse scene route"
+                  }
+              ]
+}
