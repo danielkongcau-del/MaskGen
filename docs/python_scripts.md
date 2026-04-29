@@ -294,11 +294,15 @@ Attaches generated local geometry to split topology using residual-corrected ret
 
 It retrieves the nearest train layout, predicts a residual frame correction per renderable node, uses the refined frame as the forced oracle-frame geometry prefix, then computes the generated local bbox and clamps the final frame by that bbox before writing the full parse graph. This is the split-target diagnostic for the full "retrieve layout, adjust frame, generate local shape, clamp by generated bbox" chain.
 
+Generated local shapes pass through a bbox quality gate. Degenerate, tiny world-space, or fully off-canvas bboxes are retried with fresh geometry samples, and persistent failures can fall back to a same-role/label/model true local shape from the retrieval split while keeping the residual-refined frame. The summary records geometry sample request, retry, fallback, and final quality-failure counts.
+
 ### `scripts/attach_retrieved_residual_layout_oracle_frame_geometry_to_topology_samples.py`
 
 Attaches residual-corrected retrieved-layout frames and generated local geometry to generated topology samples.
 
 It decodes semantic-valid generated topology rows, retrieves a similar train layout, applies the residual frame predictor, samples local `POLYS`/`ATOMS` from the oracle-frame geometry checkpoint, clamps the final frame with the generated local bbox, and writes full parse-graph targets plus per-node frame/refinement/clamp diagnostics.
+
+Like the split-target variant, it retries local geometry samples whose generated bbox is degenerate, tiny after scaling, or fully outside the canvas, then falls back to a true local shape from the retrieval split when retries do not produce a usable shape. This keeps the layout experiment focused on frame quality while preventing a small number of collapsed local shapes from dominating the spatial audit.
 
 ### `scripts/train_manual_relative_layout_ar.py`
 

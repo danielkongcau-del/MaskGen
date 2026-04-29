@@ -7,6 +7,12 @@ import unittest
 
 import torch
 
+from partition_gen.manual_geometry_shape_fallback import (
+    build_geometry_shape_fallback_library,
+    geometry_target_from_fallback_shape,
+    local_bbox_quality,
+    select_fallback_geometry_shape,
+)
 from partition_gen.manual_layout_residual import (
     ManualLayoutResidualDataset,
     ManualLayoutResidualRegressor,
@@ -168,6 +174,57 @@ class ManualLayoutResidualTest(unittest.TestCase):
         self.assertEqual(clamped["scale"], 96.0)
         self.assertTrue(diagnostics["geometry_scale_clamped"])
         self.assertTrue(diagnostics["geometry_frame_clamp_strong"])
+
+    def test_local_bbox_quality_marks_tiny_world_bbox(self) -> None:
+        quality = local_bbox_quality(
+            {"width": 0.1, "height": 0.1},
+            {"origin": [64.0, 96.0], "scale": 3.0, "orientation": 0.0},
+            min_world_bbox_area=1.0,
+        )
+
+        self.assertFalse(quality["usable"])
+        self.assertIn("tiny_world_bbox", quality["reasons"])
+
+    def test_local_bbox_quality_marks_off_canvas_bbox(self) -> None:
+        quality = local_bbox_quality(
+            {"min_x": -0.5, "min_y": -0.5, "max_x": 0.5, "max_y": 0.5, "width": 1.0, "height": 1.0},
+            {"origin": [512.0, 512.0], "scale": 8.0, "orientation": 0.0},
+            canvas_size=[256, 256],
+            min_world_bbox_area=1.0,
+        )
+
+        self.assertFalse(quality["usable"])
+        self.assertIn("off_canvas_bbox", quality["reasons"])
+
+    def test_geometry_shape_fallback_library_selects_true_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            train = Path(tmpdir) / "split" / "train"
+            _write_split_row(
+                train,
+                stem="train_a",
+                topology=_topology_target(stem="train_a"),
+                origins=[[128.0, 128.0], [96.0, 96.0]],
+            )
+
+            library, summary = build_geometry_shape_fallback_library(train)
+            shape, mode = select_fallback_geometry_shape(
+                {
+                    "role": "support_region",
+                    "label": 0,
+                    "geometry_model": "polygon_code",
+                },
+                library,
+            )
+            geometry = geometry_target_from_fallback_shape(
+                shape,
+                source_node_id="query_support",
+                frame={"origin": [64.0, 64.0], "scale": 8.0, "orientation": 0.0},
+            )
+
+            self.assertEqual(summary["shape_count"], 2)
+            self.assertEqual(mode, "fallback_true_shape_exact")
+            self.assertEqual(geometry["source_node_id"], "query_support")
+            self.assertEqual(geometry["geometry"]["outer_local"][0], [-0.5, -0.5])
 
     def test_dataset_builds_retrieval_residual_examples(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

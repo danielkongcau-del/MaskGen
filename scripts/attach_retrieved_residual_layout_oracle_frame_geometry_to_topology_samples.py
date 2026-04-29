@@ -21,6 +21,12 @@ from partition_gen.manual_geometry_oracle_frame_conditioning import (  # noqa: E
     oracle_frame_conditioned_geometry_prefix_tokens,
 )
 from partition_gen.manual_geometry_sample_validation import decode_geometry_tokens_to_target, validate_geometry_tokens  # noqa: E402
+from partition_gen.manual_geometry_shape_fallback import (  # noqa: E402
+    build_geometry_shape_fallback_library,
+    geometry_target_from_fallback_shape,
+    local_bbox_quality,
+    select_fallback_geometry_shape,
+)
 from partition_gen.manual_layout_residual import (  # noqa: E402
     build_layout_residual_example,
     clamp_frame_to_local_bbox,
@@ -63,6 +69,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-polygons", type=int, default=8)
     parser.add_argument("--max-points-per-ring", type=int, default=128)
     parser.add_argument("--max-holes-per-polygon", type=int, default=8)
+    parser.add_argument("--geometry-retry-count", type=int, default=2)
+    parser.add_argument("--min-generated-world-bbox-area", type=float, default=1.0)
+    parser.add_argument("--min-generated-local-bbox-side", type=float, default=1e-6)
+    parser.add_argument("--disable-true-shape-fallback", action="store_true")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--progress-every", type=int, default=25)
     return parser.parse_args()
@@ -195,6 +205,11 @@ def main() -> None:
         max_samples=args.max_library_samples,
     )
     fallback_frames = build_layout_retrieval_fallbacks(library_entries)
+    shape_fallback_library, shape_fallback_summary = build_geometry_shape_fallback_library(
+        args.library_split_root,
+        max_samples=args.max_library_samples,
+        min_local_bbox_side=float(args.min_generated_local_bbox_side),
+    )
 
     sample_rows = list(iter_jsonl(args.samples))
     if args.max_samples is not None:
@@ -213,7 +228,15 @@ def main() -> None:
     attached_total = 0
     missing_total = 0
     hit_eos_total = 0
+    sample_request_total = 0
+    sample_valid_total = 0
+    geometry_retry_total = 0
+    geometry_retry_success_total = 0
+    geometry_quality_reject_total = 0
+    geometry_fallback_total = 0
+    final_quality_failure_total = 0
     last_progress = 0
+    quality_reasons: Counter[str] = Counter()
 
     for fallback_index, row in enumerate(sample_rows):
         tokens = [str(token) for token in row.get("tokens", []) or []]
@@ -255,6 +278,14 @@ def main() -> None:
         sample_missing = 0
         sample_attach_modes: Counter[str] = Counter()
         sample_frame_clamp_modes: Counter[str] = Counter()
+        sample_quality_reasons: Counter[str] = Counter()
+        sample_retry_count = 0
+        sample_retry_success_count = 0
+        sample_quality_reject_count = 0
+        sample_fallback_count = 0
+        sample_final_quality_failure_count = 0
+        sample_sample_request_count = 0
+        sample_sample_valid_count = 0
         geometry_rows: list[dict] = []
 
         for node_index, node in enumerate(graph.get("nodes", []) or []):
@@ -294,32 +325,113 @@ def main() -> None:
                             device=device,
                             config=tokenizer_config,
                         )
-                        generated, diagnostics = _sample_local_geometry(
-                            model=geometry_model,
-                            vocab=vocab,
-                            topology_target=topology_target,
-                            node=output_node,
-                            node_index=int(node_index),
-                            geometry_ref=str(geometry_ref),
-                            conditioning_frame=refined_frame,
-                            tokenizer_config=tokenizer_config,
-                            constraint_config=constraint_config,
-                            max_new_tokens=int(args.max_new_tokens),
-                            temperature=float(args.temperature),
-                            top_k=int(args.top_k) if int(args.top_k) > 0 else None,
-                            device=device,
-                        )
-                        generated_local_bbox = geometry_local_bbox(generated)
-                        final_frame, clamp_diagnostics = clamp_frame_to_local_bbox(
-                            refined_frame,
-                            generated_local_bbox,
-                            config=tokenizer_config,
-                        )
+                        retry_count = max(0, int(args.geometry_retry_count))
+                        generated = None
+                        diagnostics: dict = {}
+                        generated_local_bbox: dict = {}
+                        final_frame: dict = {}
+                        clamp_diagnostics: dict = {}
+                        quality: dict = {}
+                        attempt_rows: list[dict] = []
+                        used_fallback = False
+                        fallback_mode = None
+                        fallback_shape_source = None
+                        for attempt_index in range(retry_count + 1):
+                            sample_request_total += 1
+                            sample_sample_request_count += 1
+                            generated, diagnostics = _sample_local_geometry(
+                                model=geometry_model,
+                                vocab=vocab,
+                                topology_target=topology_target,
+                                node=output_node,
+                                node_index=int(node_index),
+                                geometry_ref=str(geometry_ref),
+                                conditioning_frame=refined_frame,
+                                tokenizer_config=tokenizer_config,
+                                constraint_config=constraint_config,
+                                max_new_tokens=int(args.max_new_tokens),
+                                temperature=float(args.temperature),
+                                top_k=int(args.top_k) if int(args.top_k) > 0 else None,
+                                device=device,
+                            )
+                            sample_valid_total += 1
+                            sample_sample_valid_count += 1
+                            generated_local_bbox = geometry_local_bbox(generated)
+                            final_frame, clamp_diagnostics = clamp_frame_to_local_bbox(
+                                refined_frame,
+                                generated_local_bbox,
+                                config=tokenizer_config,
+                            )
+                            quality = local_bbox_quality(
+                                generated_local_bbox,
+                                final_frame,
+                                canvas_size=topology_target.get("size", [256, 256]),
+                                min_world_bbox_area=float(args.min_generated_world_bbox_area),
+                                min_local_bbox_side=float(args.min_generated_local_bbox_side),
+                            )
+                            attempt_rows.append(
+                                {
+                                    "attempt_index": int(attempt_index),
+                                    "quality": quality,
+                                    "diagnostics": diagnostics,
+                                    "frame_clamp": clamp_diagnostics,
+                                }
+                            )
+                            if bool(quality["usable"]):
+                                if attempt_index > 0:
+                                    geometry_retry_success_total += 1
+                                    sample_retry_success_count += 1
+                                break
+                            geometry_quality_reject_total += 1
+                            sample_quality_reject_count += 1
+                            quality_reasons.update(quality.get("reasons", []) or [])
+                            sample_quality_reasons.update(quality.get("reasons", []) or [])
+                            if attempt_index < retry_count:
+                                geometry_retry_total += 1
+                                sample_retry_count += 1
+                        if not bool(quality.get("usable", False)) and not bool(args.disable_true_shape_fallback):
+                            fallback_shape, fallback_mode = select_fallback_geometry_shape(output_node, shape_fallback_library)
+                            if fallback_shape is not None:
+                                generated = geometry_target_from_fallback_shape(
+                                    fallback_shape,
+                                    source_node_id=str(geometry_ref),
+                                    frame=refined_frame,
+                                )
+                                generated_local_bbox = geometry_local_bbox(generated)
+                                final_frame, clamp_diagnostics = clamp_frame_to_local_bbox(
+                                    refined_frame,
+                                    generated_local_bbox,
+                                    config=tokenizer_config,
+                                )
+                                quality = local_bbox_quality(
+                                    generated_local_bbox,
+                                    final_frame,
+                                    canvas_size=topology_target.get("size", [256, 256]),
+                                    min_world_bbox_area=float(args.min_generated_world_bbox_area),
+                                    min_local_bbox_side=float(args.min_generated_local_bbox_side),
+                                )
+                                used_fallback = True
+                                fallback_shape_source = fallback_shape.get("source_stem")
+                                geometry_fallback_total += 1
+                                sample_fallback_count += 1
+                        if generated is None:
+                            raise RuntimeError("geometry sampling produced no candidate")
+                        if not bool(quality.get("usable", False)):
+                            final_quality_failure_total += 1
+                            sample_final_quality_failure_count += 1
+                            quality_reasons.update(quality.get("reasons", []) or [])
+                            sample_quality_reasons.update(quality.get("reasons", []) or [])
                         frame_clamp_mode = _frame_clamp_mode(clamp_diagnostics)
                         frame_clamp_modes[frame_clamp_mode] += 1
                         sample_frame_clamp_modes[frame_clamp_mode] += 1
                         final_scale_ratios.append(float(clamp_diagnostics["scale_ratio"]))
                         generated["frame"] = copy.deepcopy(final_frame)
+                        attach_mode = (
+                            "retrieved_residual_frame_fallback_true_shape"
+                            if used_fallback
+                            else "retrieved_residual_frame_generated"
+                        )
+                        shape_attach_mode = "fallback_true_shape" if used_fallback else "generated_shape"
                         geometry_row.update(
                             {
                                 **diagnostics,
@@ -330,6 +442,12 @@ def main() -> None:
                                 "generated_local_bbox": generated_local_bbox,
                                 "frame_clamp": clamp_diagnostics,
                                 "frame_clamp_mode": frame_clamp_mode,
+                                "local_bbox_quality": quality,
+                                "geometry_attempts": attempt_rows,
+                                "geometry_attempt_count": int(len(attempt_rows)),
+                                "used_fallback_true_shape": bool(used_fallback),
+                                "fallback_mode": fallback_mode,
+                                "fallback_shape_source": fallback_shape_source,
                             }
                         )
                         hit_eos_total += int(bool(diagnostics.get("hit_eos", False)))
@@ -342,19 +460,22 @@ def main() -> None:
                         output_node["layout_residual"] = residual
                         output_node["generated_local_bbox"] = generated_local_bbox
                         output_node["frame_clamp"] = clamp_diagnostics
+                        output_node["local_bbox_quality"] = quality
+                        output_node["geometry_attempt_count"] = int(len(attempt_rows))
+                        output_node["geometry_fallback_mode"] = fallback_mode
                         if "geometry" in generated:
                             output_node["geometry"] = copy.deepcopy(generated["geometry"])
                         if "atoms" in generated:
                             output_node["atoms"] = copy.deepcopy(generated["atoms"])
                         output_node["layout_frame_source"] = "retrieved_residual_layout"
-                        output_node["layout_shape_attach_mode"] = "generated_shape"
+                        output_node["layout_shape_attach_mode"] = shape_attach_mode
                         output_node["retrieved_residual_frame_geometry"] = True
                         sample_valid += 1
                         valid_total += 1
                         sample_attached += 1
                         attached_total += 1
-                        attach_modes["retrieved_residual_frame_generated"] += 1
-                        sample_attach_modes["retrieved_residual_frame_generated"] += 1
+                        attach_modes[attach_mode] += 1
+                        sample_attach_modes[attach_mode] += 1
                     except Exception as exc:
                         sample_missing += 1
                         missing_total += 1
@@ -400,6 +521,14 @@ def main() -> None:
                 "missing_geometry_count": int(sample_missing),
                 "attach_modes": dict(sample_attach_modes),
                 "frame_clamp_modes": dict(sample_frame_clamp_modes),
+                "geometry_sample_request_count": int(sample_sample_request_count),
+                "geometry_sample_valid_count": int(sample_sample_valid_count),
+                "geometry_retry_count": int(sample_retry_count),
+                "geometry_retry_success_count": int(sample_retry_success_count),
+                "geometry_quality_reject_count": int(sample_quality_reject_count),
+                "geometry_fallback_true_shape_count": int(sample_fallback_count),
+                "geometry_final_quality_failure_count": int(sample_final_quality_failure_count),
+                "geometry_quality_reasons": dict(sample_quality_reasons),
                 "geometry_rows": geometry_rows,
                 "geometry_checkpoint": str(args.geometry_checkpoint.as_posix()),
                 "layout_residual_checkpoint": str(args.layout_residual_checkpoint.as_posix()),
@@ -418,6 +547,10 @@ def main() -> None:
                 "missing_geometry_count": int(sample_missing),
                 "attach_modes": dict(sample_attach_modes),
                 "frame_clamp_modes": dict(sample_frame_clamp_modes),
+                "geometry_sample_request_count": int(sample_sample_request_count),
+                "geometry_retry_count": int(sample_retry_count),
+                "geometry_fallback_true_shape_count": int(sample_fallback_count),
+                "geometry_final_quality_failure_count": int(sample_final_quality_failure_count),
             }
         )
 
@@ -435,9 +568,21 @@ def main() -> None:
         "max_library_samples": args.max_library_samples,
         "exclude_same_stem": bool(args.exclude_same_stem),
         "library_summary": library_summary,
+        "shape_fallback_summary": shape_fallback_summary,
         "geometry_request_count": int(request_total),
         "geometry_valid_count": int(valid_total),
         "geometry_hit_eos_count": int(hit_eos_total),
+        "geometry_sample_request_count": int(sample_request_total),
+        "geometry_sample_valid_count": int(sample_valid_total),
+        "geometry_retry_count": int(geometry_retry_total),
+        "geometry_retry_success_count": int(geometry_retry_success_total),
+        "geometry_quality_reject_count": int(geometry_quality_reject_total),
+        "geometry_fallback_true_shape_count": int(geometry_fallback_total),
+        "geometry_final_quality_failure_count": int(final_quality_failure_total),
+        "geometry_quality_reasons": dict(quality_reasons),
+        "min_generated_world_bbox_area": float(args.min_generated_world_bbox_area),
+        "min_generated_local_bbox_side": float(args.min_generated_local_bbox_side),
+        "disable_true_shape_fallback": bool(args.disable_true_shape_fallback),
         "attached_geometry_count": int(attached_total),
         "missing_geometry_count": int(missing_total),
         "attach_modes": dict(attach_modes),
